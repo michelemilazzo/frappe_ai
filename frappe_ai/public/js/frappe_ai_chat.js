@@ -1,0 +1,2824 @@
+(function () {
+	"use strict";
+
+	if (window.FrappeAI?._initialized) {
+		return;
+	}
+
+	// ─── SAMPLE_DATA (replace with API in v2) ────────────────────────────────────
+	const SAMPLE_CONVERSATIONS = [
+		{
+			id: "conv_001",
+			title: "Open Purchase Orders",
+			last_message: "You have 14 open POs totalling ₹8.4L",
+			timestamp: "2m ago",
+			messages: [
+				{
+					role: "user",
+					content: "Show me all open purchase orders",
+					timestamp: "10:32 AM",
+				},
+				{
+					role: "assistant",
+					content:
+						"You have **14 open Purchase Orders** totalling **₹8,42,300**.\n\nTop 3 by value:\n\n| Supplier | Amount | Due Date |\n|---|---|---|\n| Tata Steel Ltd | ₹2,10,000 | 12 Jun 2025 |\n| Infosys BPO | ₹1,85,500 | 18 Jun 2025 |\n| Reliance Ind | ₹1,20,000 | 22 Jun 2025 |\n\nWould you like me to filter by due date or supplier?",
+					timestamp: "10:32 AM",
+				},
+			],
+		},
+		{
+			id: "conv_002",
+			title: "Pending Approvals",
+			last_message: "3 leave applications awaiting your approval",
+			timestamp: "1h ago",
+			messages: [
+				{
+					role: "user",
+					content: "Any pending approvals for me?",
+					timestamp: "9:15 AM",
+				},
+				{
+					role: "assistant",
+					content:
+						"You have **3 pending approvals**:\n\n1. **Leave Application** — Ravi Kumar (Sick Leave, 2 days)\n2. **Expense Claim** — Priya Shah (₹4,200 travel)\n3. **Purchase Order** — ₹85,000 from Wipro Ltd\n\nShall I open any of these?",
+					timestamp: "9:15 AM",
+				},
+			],
+		},
+	];
+
+	const SAMPLE_RESPONSES = [
+		"I found **{n} records** matching your query. Here's a summary...",
+		"Based on your data, here are the key insights:\n\n- Total value: **₹{amount}**\n- Records this month: **{count}**\n- Trend: ↑ 12% vs last month",
+		"I don't have permission to access that DocType. Please check your role assignments.",
+		'Here\'s the breakdown:\n\n```json\n{\n  "total": 42,\n  "pending": 7,\n  "overdue": 3\n}\n```',
+	];
+
+	// ─── STATE ───────────────────────────────────────────────────────────────────
+	const MARKED_URL = "https://cdn.jsdelivr.net/npm/marked/marked.min.js";
+	const STREAM_DELAY_MS = 18;
+	const TYPING_DELAY_MS = 200;
+	const COPY_RESET_MS = 1500;
+	const SUGGESTIONS = [
+		"Show my open tasks",
+		"Summarize recent orders",
+		"List pending approvals",
+	];
+
+	let state = {
+		isOpen: false,
+		activeConversationId: null,
+		conversations: [],
+		isStreaming: false,
+		streamInterval: null,
+		hasUnread: false,
+		isTyping: false,
+		// ─── CHANGE 2: Voice + Attachment State ───
+		isRecording: false,
+		pendingAttachment: null,
+		// ─── END CHANGE 2 ───
+		// ─── CHANGE 3: Full-Screen Expand State ───
+		isExpanded: false,
+		// ─── END CHANGE 3 ───
+		// ─── CHANGE 4: Search + History State ───
+		isHistoryOpen: false,
+		isSearchOpen: false,
+		searchQuery: "",
+		// ─── END CHANGE 4 ───
+		// ─── CHANGE 5: Connected Header Dot State ───
+		isConnected: true,
+		// ─── END CHANGE 5 ───
+	};
+
+	const dom = {
+		root: null,
+		style: null,
+		fab: null,
+		fabIcon: null,
+		badge: null,
+		panel: null,
+		// ─── CHANGE 3: Full-Screen Expand DOM Ref ───
+		panelInner: null,
+		expandButton: null,
+		// ─── END CHANGE 3 ───
+		// ─── CHANGE 4: Search + History DOM Refs ───
+		titleWrap: null,
+		historyButton: null,
+		// ─── CHANGE 8: drawerSearchInput replaces header searchInput/searchButton/searchCloseButton ───
+		drawerSearchInput: null,
+		// ─── END CHANGE 8 ───
+		historyDrawer: null,
+		historyList: null,
+		historyCloseButton: null,
+		historyNewChatButton: null,
+		// ─── END CHANGE 4 ───
+		newChatButton: null,
+		closeButton: null,
+		messagesArea: null,
+		// ─── CHANGE 2: Voice + Attachment DOM Refs ───
+		micButton: null,
+		attachButton: null,
+		fileInput: null,
+		attachmentPill: null,
+		// ─── END CHANGE 2 ───
+		textarea: null,
+		sendButton: null,
+		tokenCounter: null,
+	};
+
+let markedPromise = null;
+let markedLoaded = false;
+let typingTimeout = null;
+let renderQueued = false;
+// ─── CHANGE 3: Smooth Full-Screen Animation Guard ───
+let panelAnimation = null;
+// ─── END CHANGE 3 ───
+
+	function _log() {
+		if (window.frappe?.boot?.developer_mode === 1) {
+			console.log.apply(console, arguments);
+		}
+	}
+
+	function reducer(currentState, action) {
+		switch (action.type) {
+			case "LOAD_CONVERSATIONS": {
+				return {
+					...currentState,
+					conversations: action.conversations,
+					activeConversationId: action.activeConversationId,
+				};
+			}
+			case "OPEN": {
+				return { ...currentState, isOpen: true, hasUnread: false };
+			}
+			case "CLOSE": {
+				// ─── CHANGE 3: Collapse Expanded State On Close ───
+				return { ...currentState, isOpen: false, isExpanded: false };
+				// ─── END CHANGE 3 ───
+			}
+			case "TOGGLE_OPEN": {
+				const isOpen = !currentState.isOpen;
+				return { ...currentState, isOpen, hasUnread: isOpen ? false : currentState.hasUnread };
+			}
+			case "NEW_CHAT": {
+				return {
+					...currentState,
+					activeConversationId: null,
+					isTyping: false,
+					isStreaming: false,
+					streamInterval: null,
+					// ─── CHANGE 2: Clear Pending Attachment For New Chat ───
+					pendingAttachment: null,
+					// ─── END CHANGE 2 ───
+					// ─── CHANGE 4: Close Search + History For New Chat ───
+					isHistoryOpen: false,
+					isSearchOpen: false,
+					searchQuery: "",
+					// ─── END CHANGE 4 ───
+				};
+			}
+			// ─── CHANGE 2: Voice + Attachment Reducer Actions ───
+			case "TOGGLE_RECORDING": {
+				return { ...currentState, isRecording: !currentState.isRecording };
+			}
+			case "SET_ATTACHMENT": {
+				return { ...currentState, pendingAttachment: action.attachment };
+			}
+			case "CLEAR_ATTACHMENT": {
+				return { ...currentState, pendingAttachment: null };
+			}
+			// TODO: API — upload attachment before sending message
+			// ─── END CHANGE 2 ───
+			// ─── CHANGE 3: Full-Screen Expand Reducer Actions ───
+			case "TOGGLE_EXPANDED": {
+				return { ...currentState, isExpanded: !currentState.isExpanded };
+			}
+			case "COLLAPSE_EXPANDED": {
+				return { ...currentState, isExpanded: false };
+			}
+			// ─── END CHANGE 3 ───
+			// ─── CHANGE 4: Search + History Reducer Actions ───
+			case "TOGGLE_HISTORY": {
+				return {
+					...currentState,
+					isHistoryOpen: !currentState.isHistoryOpen,
+					isSearchOpen: false,
+					searchQuery: "",
+				};
+			}
+			case "CLOSE_HISTORY": {
+				return { ...currentState, isHistoryOpen: false };
+			}
+			case "OPEN_SEARCH": {
+				return {
+					...currentState,
+					isSearchOpen: true,
+					isHistoryOpen: false,
+					searchQuery: "",
+				};
+			}
+			case "CLOSE_SEARCH": {
+				return { ...currentState, isSearchOpen: false, searchQuery: "" };
+			}
+			case "SET_SEARCH_QUERY": {
+				return { ...currentState, searchQuery: action.searchQuery };
+			}
+			case "SELECT_CONVERSATION": {
+				return {
+					...currentState,
+					activeConversationId: action.conversationId,
+					isHistoryOpen: false,
+					isSearchOpen: false,
+					searchQuery: "",
+				};
+			}
+			// TODO: API — replace with server-side search in v2
+			// ─── END CHANGE 4 ───
+			case "ADD_CONVERSATION": {
+				return {
+					...currentState,
+					conversations: [action.conversation, ...currentState.conversations],
+					activeConversationId: action.conversation.id,
+				};
+			}
+			case "ADD_MESSAGE": {
+				return {
+					...currentState,
+					conversations: currentState.conversations.map((conversation) => {
+						if (conversation.id !== action.conversationId) {
+							return conversation;
+						}
+
+						return {
+							...conversation,
+							last_message: action.message.content,
+							timestamp: "just now",
+							messages: [...conversation.messages, action.message],
+						};
+					}),
+				};
+			}
+			case "SHOW_TYPING": {
+				return { ...currentState, isStreaming: true, isTyping: true };
+			}
+			case "START_STREAM": {
+				return {
+					...currentState,
+					isStreaming: true,
+					isTyping: false,
+					streamInterval: action.streamInterval,
+					conversations: currentState.conversations.map((conversation) => {
+						if (conversation.id !== action.conversationId) {
+							return conversation;
+						}
+
+						return {
+							...conversation,
+							streamingMessageId: action.message.id,
+							messages: [...conversation.messages, action.message],
+						};
+					}),
+				};
+			}
+			case "APPEND_STREAM_CHUNK": {
+				return updateStreamingMessage(currentState, action.conversationId, (message) => ({
+					...message,
+					content: message.content + action.chunk,
+				}));
+			}
+			case "FINISH_STREAM": {
+				return finishStreamingMessage(currentState, action.conversationId, {
+					isStreaming: false,
+					streamInterval: null,
+					hasUnread: currentState.isOpen ? currentState.hasUnread : true,
+				});
+			}
+			case "STOP_STREAM": {
+				return finishStreamingMessage(currentState, action.conversationId, {
+					isStreaming: false,
+					isTyping: false,
+					streamInterval: null,
+				});
+			}
+			default:
+				return currentState;
+		}
+	}
+
+	function updateStreamingMessage(currentState, conversationId, updater) {
+		return {
+			...currentState,
+			conversations: currentState.conversations.map((conversation) => {
+				if (conversation.id !== conversationId) {
+					return conversation;
+				}
+
+				const messages = conversation.messages.map((message) => {
+					return message.id === conversation.streamingMessageId ? updater(message) : message;
+				});
+				const lastMessage = messages[messages.length - 1];
+
+				return {
+					...conversation,
+					last_message: lastMessage?.content || "",
+					timestamp: "just now",
+					messages,
+				};
+			}),
+		};
+	}
+
+	function finishStreamingMessage(currentState, conversationId, statePatch) {
+		return {
+			...currentState,
+			...statePatch,
+			conversations: currentState.conversations.map((conversation) => {
+				if (conversation.id !== conversationId) {
+					return conversation;
+				}
+
+				const messages = conversation.messages.map((message) => {
+					if (message.id !== conversation.streamingMessageId) {
+						return message;
+					}
+
+					return { ...message, isStreaming: false };
+				});
+				const lastMessage = messages[messages.length - 1];
+
+				return {
+					...conversation,
+					streamingMessageId: null,
+					last_message: lastMessage?.content || conversation.last_message,
+					timestamp: "just now",
+					messages,
+				};
+			}),
+		};
+	}
+
+	function setState(action, options) {
+		state = reducer(state, action);
+		if (options?.skipRender) {
+			return;
+		}
+		queueRender();
+	}
+
+	function queueRender() {
+		if (renderQueued) {
+			return;
+		}
+
+		renderQueued = true;
+		window.requestAnimationFrame(() => {
+			renderQueued = false;
+			render();
+		});
+	}
+
+	function getActiveConversation() {
+		return state.conversations.find((conversation) => {
+			return conversation.id === state.activeConversationId;
+		});
+	}
+
+	function getActiveConversationId() {
+		return state.activeConversationId;
+	}
+
+	function createMessage(role, content, extra) {
+		return {
+			id: `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+			role,
+			content,
+			timestamp: "just now",
+			createdAt: Date.now(),
+			...(extra || {}),
+		};
+	}
+
+	// ─── DOM BUILDER ─────────────────────────────────────────────────────────────
+	function buildDom() {
+		dom.root = document.createElement("div");
+		dom.root.className = "frappe-ai-chat-root";
+		dom.root.innerHTML = `
+			<button
+				class="frappe-ai-fab"
+				type="button"
+				aria-label="Open AI Assistant"
+				aria-expanded="false"
+				role="button"
+				tabindex="0"
+			>
+				<span class="frappe-ai-fab-icon" aria-hidden="true">${getIcon("chat")}</span>
+				<span class="frappe-ai-unread-badge" aria-hidden="true"></span>
+			</button>
+			<section class="frappe-ai-panel" role="dialog" aria-label="Frappe AI Chat" aria-modal="false">
+				<div class="frappe-ai-panel-inner">
+					<header class="frappe-ai-header">
+						<div class="frappe-ai-title-wrap">
+							<div class="frappe-ai-title">
+								<!-- ─── CHANGE 5: Connected Header Dot ─── -->
+								<span class="frappe-ai-status-dot" aria-hidden="true"></span>
+								<!-- ─── END CHANGE 5 ─── -->
+								<span class="frappe-ai-app-icon" aria-hidden="true">${getIcon("brain")}</span>
+								<span>Frappe AI</span>
+							</div>
+							<!-- ─── CHANGE 4: Inline Chat Search Bar ─── -->
+							<!-- ─── CHANGE 8: Search bar moved to history drawer; header slot kept as empty placeholder ─── -->
+							<!-- ─── END CHANGE 8 ─── -->
+							<!-- ─── END CHANGE 4 ─── -->
+						</div>
+						<div class="frappe-ai-header-actions">
+							<!-- ─── CHANGE 4: Search + History Header Buttons ─── -->
+							<button class="frappe-ai-icon-button fai-btn-history" type="button" data-action="history" aria-label="Chat history">
+								${getIcon("history")}
+							</button>
+							<!-- ─── END CHANGE 4 ─── -->
+							<!-- ─── CHANGE 6: New Chat button gets fai-btn-new-chat class for hide-in-expanded ─── -->
+							<button class="frappe-ai-icon-button fai-btn-new-chat" type="button" data-action="new-chat" aria-label="New Chat">
+								${getIcon("plus")}
+							</button>
+							<!-- ─── END CHANGE 6 ─── -->
+							<!-- ─── CHANGE 3: Expand Header Button ─── -->
+							<!-- ─── CHANGE 7: fai-btn-collapse class for highlight-in-expanded ─── -->
+							<button class="frappe-ai-icon-button fai-btn-collapse" type="button" data-action="expand" aria-label="Expand Chat">
+								${getIcon("expand")}
+							</button>
+							<!-- ─── END CHANGE 7 ─── -->
+							<!-- ─── END CHANGE 3 ─── -->
+							<!-- ─── CHANGE 7: fai-btn-close class for highlight-in-expanded ─── -->
+							<button class="frappe-ai-icon-button fai-btn-close" type="button" data-action="close" aria-label="Close">
+								${getIcon("close")}
+							</button>
+							<!-- ─── END CHANGE 7 ─── -->
+						</div>
+					</header>
+					<div class="frappe-ai-messages-shell">
+						<div class="frappe-ai-messages" role="log" aria-live="polite" aria-relevant="additions"></div>
+						<!-- ─── CHANGE 4: History Drawer ─── -->
+						<aside class="frappe-ai-history-drawer" aria-label="Conversation history">
+							<div class="frappe-ai-history-header">
+								<strong>Conversations</strong>
+								<button class="frappe-ai-icon-button" type="button" data-action="close-history" aria-label="Close History">
+									${getIcon("close")}
+								</button>
+							</div>
+							<input class="frappe-ai-drawer-search-input" type="text" placeholder="Search conversations..." aria-label="Search conversations" />
+							<div class="frappe-ai-history-list"></div>
+							<div class="frappe-ai-history-footer">
+								<button class="frappe-ai-history-primary-new" type="button" data-action="history-new-chat">
+									${getIcon("plus")}
+									<span>New Conversation</span>
+								</button>
+							</div>
+						</aside>
+						<!-- ─── END CHANGE 4 ─── -->
+					</div>
+					<form class="frappe-ai-input-area">
+						<!-- ─── CHANGE 2: Attachment Pill + Voice/Attachment Controls ─── -->
+						<div class="frappe-ai-attachment-pill"></div>
+						<input class="frappe-ai-file-input" type="file" accept=".pdf,.png,.jpg,.jpeg,.xlsx,.csv,.docx" hidden />
+						<!-- ─── END CHANGE 2 ─── -->
+						<div class="frappe-ai-input-row">
+							<!-- ─── CHANGE 2: Voice + Attachment Buttons ─── -->
+							<button class="frappe-ai-input-icon-button" type="button" data-action="voice" aria-label="Record voice message">
+								${getIcon("mic")}
+							</button>
+							<button class="frappe-ai-input-icon-button" type="button" data-action="attach" aria-label="Attach file">
+								${getIcon("paperclip")}
+							</button>
+							<!-- ─── END CHANGE 2 ─── -->
+							<div class="frappe-ai-textarea-wrap">
+								<textarea
+									class="frappe-ai-textarea"
+									rows="1"
+									placeholder="Ask anything about your data..."
+									aria-label="Ask anything about your data"
+								></textarea>
+							</div>
+							<button class="frappe-ai-send-button" type="submit" aria-label="Send Message">
+								${getIcon("send")}
+							</button>
+						</div>
+						<div class="frappe-ai-token-counter">~0 tokens</div>
+					</form>
+				</div>
+			</section>
+		`;
+
+		document.body.appendChild(dom.root);
+
+		dom.fab = dom.root.querySelector(".frappe-ai-fab");
+		dom.fabIcon = dom.root.querySelector(".frappe-ai-fab-icon");
+		dom.badge = dom.root.querySelector(".frappe-ai-unread-badge");
+		dom.panel = dom.root.querySelector(".frappe-ai-panel");
+		// ─── CHANGE 3: Full-Screen Expand DOM Ref Init ───
+		dom.panelInner = dom.root.querySelector(".frappe-ai-panel-inner");
+		dom.expandButton = dom.root.querySelector('[data-action="expand"]');
+		// ─── END CHANGE 3 ───
+		// ─── CHANGE 4: Search + History DOM Ref Init ───
+		dom.titleWrap = dom.root.querySelector(".frappe-ai-title-wrap");
+		dom.historyButton = dom.root.querySelector('[data-action="history"]');
+		// ─── CHANGE 8: Search refs moved to drawer; header search elements removed ───
+		dom.searchInput = null;
+		dom.searchButton = null;
+		dom.searchCloseButton = null;
+		dom.drawerSearchInput = dom.root.querySelector(".frappe-ai-drawer-search-input");
+		// ─── END CHANGE 8 ───
+		dom.historyDrawer = dom.root.querySelector(".frappe-ai-history-drawer");
+		dom.historyList = dom.root.querySelector(".frappe-ai-history-list");
+		dom.historyCloseButton = dom.root.querySelector('[data-action="close-history"]');
+		dom.historyNewChatButton = dom.root.querySelector('[data-action="history-new-chat"]');
+		// ─── END CHANGE 4 ───
+		dom.newChatButton = dom.root.querySelector('[data-action="new-chat"]');
+		dom.closeButton = dom.root.querySelector('[data-action="close"]');
+		dom.messagesArea = dom.root.querySelector(".frappe-ai-messages");
+		// ─── CHANGE 2: Voice + Attachment DOM Ref Init ───
+		dom.micButton = dom.root.querySelector('[data-action="voice"]');
+		dom.attachButton = dom.root.querySelector('[data-action="attach"]');
+		dom.fileInput = dom.root.querySelector(".frappe-ai-file-input");
+		dom.attachmentPill = dom.root.querySelector(".frappe-ai-attachment-pill");
+		// ─── END CHANGE 2 ───
+		dom.textarea = dom.root.querySelector(".frappe-ai-textarea");
+		dom.sendButton = dom.root.querySelector(".frappe-ai-send-button");
+		dom.tokenCounter = dom.root.querySelector(".frappe-ai-token-counter");
+	}
+
+	function getIcon(name) {
+		const icons = {
+			brain: `
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M9 3.5a3 3 0 0 0-3 3v.3a3 3 0 0 0-2 2.8c0 1 .5 1.9 1.2 2.4A3.4 3.4 0 0 0 5 13.2a3.3 3.3 0 0 0 3.3 3.3H9"/>
+					<path d="M15 3.5a3 3 0 0 1 3 3v.3a3 3 0 0 1 2 2.8c0 1-.5 1.9-1.2 2.4.1.4.2.8.2 1.2a3.3 3.3 0 0 1-3.3 3.3H15"/>
+					<path d="M9 3.5v17"/>
+					<path d="M15 3.5v17"/>
+					<path d="M8.5 8H11"/>
+					<path d="M13 8h2.5"/>
+					<path d="M8.5 13H11"/>
+					<path d="M13 13h2.5"/>
+					<path d="M19.5 18.5l.5 1.2 1.2.5-1.2.5-.5 1.2-.5-1.2-1.2-.5 1.2-.5.5-1.2Z"/>
+				</svg>`,
+			chat: `
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4Z"/>
+					<path d="M8 9h8"/>
+					<path d="M8 13h5"/>
+				</svg>`,
+			close: `
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+					<path d="M6 6l12 12"/>
+					<path d="M18 6L6 18"/>
+				</svg>`,
+			copy: `
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+					<rect x="9" y="9" width="11" height="11" rx="2"/>
+					<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+				</svg>`,
+			chevron: `
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+					<path d="m6 9 6 6 6-6"/>
+				</svg>`,
+			// ─── CHANGE 3: Expand/Collapse Icons ───
+			expand: `
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M15 3h6v6"/>
+					<path d="m21 3-7 7"/>
+					<path d="M9 21H3v-6"/>
+					<path d="m3 21 7-7"/>
+				</svg>`,
+			collapse: `
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M9 3v6H3"/>
+					<path d="m3 9 7-7"/>
+					<path d="M15 21v-6h6"/>
+					<path d="m21 15-7 7"/>
+				</svg>`,
+			// ─── END CHANGE 3 ───
+			// ─── CHANGE 4: Search + History Icons ───
+			search: `
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+					<circle cx="11" cy="11" r="7"/>
+					<path d="m20 20-3.5-3.5"/>
+				</svg>`,
+			history: `
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M3 12a9 9 0 1 0 3-6.7"/>
+					<path d="M3 4v5h5"/>
+					<path d="M12 7v5l3 2"/>
+				</svg>`,
+			// ─── END CHANGE 4 ───
+			// ─── CHANGE 5: Suggestion Chip Icons ───
+			checklist: `
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+					<path d="m4 7 2 2 4-4"/>
+					<path d="M12 8h8"/>
+					<path d="m4 17 2 2 4-4"/>
+					<path d="M12 18h8"/>
+				</svg>`,
+			barChart: `
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M4 20V10"/>
+					<path d="M10 20V4"/>
+					<path d="M16 20v-7"/>
+					<path d="M22 20H2"/>
+				</svg>`,
+			inbox: `
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M22 12h-6l-2 3h-4l-2-3H2"/>
+					<path d="m5.5 5-3.2 7v6a2 2 0 0 0 2 2h15.4a2 2 0 0 0 2-2v-6L18.5 5Z"/>
+				</svg>`,
+			// ─── END CHANGE 5 ───
+			// ─── CHANGE 2: Voice + Attachment Icons ───
+			mic: `
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"/>
+					<path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+					<path d="M12 19v3"/>
+				</svg>`,
+			paperclip: `
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+					<path d="m21.4 11.6-8.5 8.5a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 1 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/>
+				</svg>`,
+			// ─── END CHANGE 2 ───
+			plus: `
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+					<path d="M12 5v14"/>
+					<path d="M5 12h14"/>
+				</svg>`,
+			regenerate: `
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M21 12a9 9 0 0 1-15 6.7"/>
+					<path d="M3 12a9 9 0 0 1 15-6.7"/>
+					<path d="M18 3v4h-4"/>
+					<path d="M6 21v-4h4"/>
+				</svg>`,
+			send: `
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<path d="m22 2-7 20-4-9-9-4Z"/>
+					<path d="M22 2 11 13"/>
+				</svg>`,
+			stop: `
+				<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+					<rect x="7" y="7" width="10" height="10" rx="1.5"/>
+				</svg>`,
+		};
+
+		return icons[name] || "";
+	}
+
+	// ─── STYLES ──────────────────────────────────────────────────────────────────
+	function injectStyles() {
+		if (document.getElementById("frappe-ai-chat-styles")) {
+			return;
+		}
+
+		dom.style = document.createElement("style");
+		dom.style.id = "frappe-ai-chat-styles";
+		dom.style.textContent = `
+			.frappe-ai-chat-root,
+			.frappe-ai-chat-root * {
+				box-sizing: border-box;
+			}
+
+			.frappe-ai-chat-root {
+				font-family: var(--font-stack);
+				color: var(--text-color);
+				/* // ─── CHANGE 5: Espresso Dark Mode Surface Tokens ─── */
+				--frappe-ai-canvas: var(--bg-color);
+				--frappe-ai-surface: var(--card-bg, var(--fg-color));
+				--frappe-ai-raised: var(--modal-bg, var(--card-bg, var(--fg-color)));
+				--frappe-ai-control: var(--control-bg, var(--bg-color));
+				--frappe-ai-hover: var(--fg-hover-color, var(--control-bg, var(--bg-color)));
+				--frappe-ai-subtle: var(--subtle-fg, var(--control-bg, var(--bg-color)));
+				--frappe-ai-message-surface: var(--control-bg, var(--card-bg, var(--fg-color)));
+				--frappe-ai-on-primary: var(--neutral, var(--fg-color));
+				--frappe-ai-shadow-color: color-mix(in srgb, var(--neutral-black, var(--text-color)) 16%, transparent);
+				--frappe-ai-soft-shadow-color: color-mix(in srgb, var(--neutral-black, var(--text-color)) 8%, transparent);
+				/* // ─── END CHANGE 5 ─── */
+			}
+
+			.frappe-ai-fab {
+				align-items: center;
+				background: var(--btn-primary, var(--primary-color));
+				border: 0;
+				border-radius: 50%;
+				bottom: 24px;
+				box-shadow: var(--shadow-base), 0 8px 32px var(--frappe-ai-shadow-color);
+				color: var(--frappe-ai-on-primary);
+				cursor: pointer;
+				display: flex;
+				height: 52px;
+				justify-content: center;
+				/* // ─── CHANGE 1: Bottom-Right Reposition ─── */
+				right: 24px;
+				/* // ─── END CHANGE 1 ─── */
+				padding: 0;
+				position: fixed;
+				transition: box-shadow 180ms ease, transform 180ms ease;
+				width: 52px;
+				z-index: 1040;
+			}
+
+			/* // ─── CHANGE 3: Hide FAB While Expanded (desktop only) ─── */
+			@media (min-width: 769px) {
+				.frappe-ai-chat-root.is-expanded .frappe-ai-fab {
+					display: none;
+				}
+			}
+			/* // ─── END CHANGE 3 ─── */
+
+			.frappe-ai-fab:hover {
+				box-shadow: var(--shadow-base), 0 12px 36px var(--frappe-ai-shadow-color);
+				transform: translateY(-2px) scale(1.05);
+			}
+
+			.frappe-ai-fab:focus-visible,
+			.frappe-ai-icon-button:focus-visible,
+			/* // ─── CHANGE 2: Voice + Attachment Focus State ─── */
+			.frappe-ai-input-icon-button:focus-visible,
+			/* // ─── END CHANGE 2 ─── */
+			.frappe-ai-send-button:focus-visible,
+			.frappe-ai-suggestion-chip:focus-visible,
+			/* // ─── CHANGE 5: Textarea Uses Wrapper Focus Ring ─── */
+			.frappe-ai-copy-code:focus-visible,
+			/* // ─── END CHANGE 5 ─── */
+			.frappe-ai-bubble-action:focus-visible {
+				outline: 2px solid var(--primary-color);
+				outline-offset: 2px;
+			}
+
+			.frappe-ai-fab-icon,
+			.frappe-ai-fab-icon svg {
+				display: block;
+				height: 24px;
+				width: 24px;
+			}
+
+			.frappe-ai-unread-badge {
+				background: var(--red-500, var(--primary-color));
+				border: 2px solid var(--frappe-ai-raised);
+				border-radius: 50%;
+				height: 12px;
+				position: absolute;
+				right: 3px;
+				top: 3px;
+				transform: scale(0);
+				transition: transform 160ms ease;
+				width: 12px;
+			}
+
+			.frappe-ai-unread-badge.is-visible {
+				transform: scale(1);
+			}
+
+			.frappe-ai-panel {
+				background: var(--frappe-ai-raised);
+				border: 1px solid var(--border-color);
+				border-radius: 12px;
+				bottom: 88px;
+				box-shadow: var(--shadow-base), 0 8px 32px var(--frappe-ai-shadow-color);
+				display: flex;
+				flex-direction: column;
+				height: 560px;
+				opacity: 0;
+				overflow: hidden;
+				pointer-events: none;
+				position: fixed;
+				/* // ─── CHANGE 1: Bottom-Right Reposition ─── */
+				right: 24px;
+				/* // ─── END CHANGE 1 ─── */
+				transform: translateY(16px);
+				/* // ─── CHANGE 3: Smooth Full-Screen Animation Polish ─── */
+				transform-origin: top left;
+				transition: opacity 220ms ease-out, transform 220ms ease-out,
+					border-radius 260ms ease-in-out, box-shadow 260ms ease-in-out;
+				will-change: transform, opacity, border-radius;
+				/* // ─── END CHANGE 3 ─── */
+				width: 380px;
+				z-index: 1039;
+			}
+
+			.frappe-ai-panel.is-open {
+				opacity: 1;
+				pointer-events: auto;
+				transform: translateY(0);
+			}
+
+			/* // ─── CHANGE 3: Full-Screen Expand Mode (desktop only — mobile uses popover) ─── */
+			.frappe-ai-panel-inner {
+				display: flex;
+				flex: 1 1 auto;
+				flex-direction: column;
+				height: 100%;
+				min-height: 0;
+				width: 100%;
+			}
+
+			@media (min-width: 769px) {
+				.frappe-ai-panel.is-expanded {
+					background: var(--frappe-ai-canvas);
+					border-radius: 0;
+					bottom: 0;
+					box-shadow: none;
+					height: 100dvh;
+					left: 0;
+					right: 0;
+					top: 0;
+					width: 100dvw;
+					z-index: 9999;
+				}
+
+				.frappe-ai-panel.is-expanded .frappe-ai-panel-inner {
+					background: var(--frappe-ai-raised);
+					margin: 0 auto;
+					max-width: 760px;
+					min-width: 0;
+				}
+
+				.frappe-ai-panel.is-expanded .frappe-ai-header,
+				.frappe-ai-panel.is-expanded .frappe-ai-input-area {
+					padding-left: 16px;
+					padding-right: 16px;
+				}
+
+				.frappe-ai-panel.is-expanded .frappe-ai-messages {
+					padding: 20px 18px;
+				}
+			}
+
+			@supports not (height: 100dvh) {
+				@media (min-width: 769px) {
+					.frappe-ai-panel.is-expanded {
+						height: 100vh;
+						width: 100vw;
+					}
+				}
+			}
+
+			/* // ─── CHANGE 3: Desktop Full-Screen Claude-Like Layout ─── */
+			@media (min-width: 769px) {
+				.frappe-ai-panel.is-expanded .frappe-ai-panel-inner {
+					background: var(--frappe-ai-canvas);
+					display: grid;
+					grid-template-columns: 232px minmax(0, 1fr);
+					grid-template-rows: 52px minmax(0, 1fr) auto;
+					margin: 0;
+					max-width: none;
+					width: 100%;
+				}
+
+				.frappe-ai-panel.is-expanded .frappe-ai-header {
+					background: var(--frappe-ai-canvas);
+					border-bottom: 0;
+					box-shadow: 0 1px 0 var(--border-color);
+					grid-column: 2;
+					grid-row: 1;
+					padding: 0 22px 0 24px;
+				}
+
+				.frappe-ai-panel.is-expanded .frappe-ai-title {
+					font-weight: 700;
+				}
+
+				.frappe-ai-panel.is-expanded .frappe-ai-messages-shell {
+					display: contents;
+				}
+
+				.frappe-ai-panel.is-expanded .frappe-ai-history-drawer {
+					background: var(--frappe-ai-subtle);
+					border-right: 1px solid var(--border-color);
+					box-shadow: 8px 0 24px var(--frappe-ai-soft-shadow-color);
+					bottom: auto;
+					grid-column: 1;
+					grid-row: 1 / 4;
+					left: auto;
+					padding: 12px 10px;
+					position: relative;
+					top: auto;
+					transform: none;
+					width: auto;
+				}
+
+				.frappe-ai-panel.is-expanded .frappe-ai-history-header {
+					height: 36px;
+					margin-bottom: 8px;
+				}
+
+				.frappe-ai-panel.is-expanded .frappe-ai-history-header .frappe-ai-icon-button {
+					display: none;
+				}
+
+				.frappe-ai-panel.is-expanded .frappe-ai-history-list {
+					border-top: 1px solid var(--border-color);
+					gap: 3px;
+					padding-top: 10px;
+					scrollbar-color: var(--scrollbar-thumb-color, var(--border-color)) var(--scrollbar-track-color, transparent);
+					scrollbar-width: thin;
+				}
+
+				.frappe-ai-panel.is-expanded .frappe-ai-conversation-row {
+					border: 0;
+					border-radius: 6px;
+					padding: 7px 8px;
+				}
+
+				.frappe-ai-panel.is-expanded .frappe-ai-conversation-snippet,
+				.frappe-ai-panel.is-expanded .frappe-ai-conversation-time {
+					display: none;
+				}
+
+				.frappe-ai-panel.is-expanded .frappe-ai-messages {
+					background: var(--frappe-ai-canvas);
+					grid-column: 2;
+					grid-row: 2;
+					padding: 8px 32px 28px;
+				}
+
+				.frappe-ai-panel.is-expanded .frappe-ai-message,
+				.frappe-ai-panel.is-expanded .frappe-ai-search-results,
+				.frappe-ai-panel.is-expanded .frappe-ai-search-empty,
+				.frappe-ai-panel.is-expanded .frappe-ai-empty-state {
+					margin-left: auto;
+					margin-right: auto;
+					max-width: 760px;
+					width: min(760px, 100%);
+				}
+
+				.frappe-ai-panel.is-expanded .frappe-ai-bubble {
+					max-width: min(680px, 88%);
+				}
+
+				.frappe-ai-panel.is-expanded .frappe-ai-message.is-user .frappe-ai-bubble {
+					max-width: min(620px, 78%);
+				}
+
+				.frappe-ai-panel.is-expanded .frappe-ai-input-area {
+					align-self: end;
+					background: transparent;
+					border-top: 0;
+					box-shadow: 0 -18px 34px color-mix(in srgb, var(--frappe-ai-canvas) 88%, transparent);
+					grid-column: 2;
+					grid-row: 3;
+					justify-self: center;
+					padding: 14px 24px 18px;
+					width: min(760px, calc(100% - 64px));
+				}
+
+				.frappe-ai-panel.is-expanded .frappe-ai-input-row {
+					background: var(--frappe-ai-message-surface);
+					border: 1px solid var(--border-color);
+					border-radius: 14px;
+					box-shadow: var(--shadow-base), 0 10px 30px var(--frappe-ai-soft-shadow-color);
+					padding: 8px;
+				}
+
+				.frappe-ai-panel.is-expanded .frappe-ai-textarea {
+					background: transparent;
+					border: 0;
+					min-height: 42px;
+				}
+
+				.frappe-ai-panel.is-expanded .frappe-ai-textarea-wrap:focus-within {
+					box-shadow: none;
+				}
+
+				.frappe-ai-panel.is-expanded .frappe-ai-token-counter {
+					padding-right: 6px;
+				}
+			}
+			/* // ─── END CHANGE 3 ─── */
+			/* // ─── END CHANGE 3 ─── */
+
+			/* // ─── CHANGE 6: Hide New Chat + History Buttons In Full-Screen Mode (desktop only) ─── */
+			@media (min-width: 769px) {
+				.fai-expanded .fai-btn-new-chat,
+				.fai-expanded .fai-btn-history {
+					display: none;
+				}
+			}
+			/* // ─── END CHANGE 6 ─── */
+
+			/* // ─── CHANGE 7: Highlight Close + Collapse Buttons In Full-Screen Mode (desktop only) ─── */
+			@media (min-width: 769px) {
+				.fai-expanded .fai-btn-close,
+				.fai-expanded .fai-btn-collapse {
+					background: color-mix(in srgb, var(--primary-color) 12%, transparent);
+					border-radius: 6px;
+					box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary-color) 30%, transparent);
+					color: var(--primary-color);
+				}
+
+				.fai-expanded .fai-btn-close:hover,
+				.fai-expanded .fai-btn-collapse:hover {
+					background: color-mix(in srgb, var(--primary-color) 22%, transparent);
+				}
+			}
+			/* // ─── END CHANGE 7 ─── */
+
+			.frappe-ai-header {
+				align-items: center;
+				/* // ─── CHANGE 5: Frosted Header Polish ─── */
+				backdrop-filter: blur(8px);
+				background: color-mix(in srgb, var(--frappe-ai-raised) 85%, transparent);
+				/* // ─── END CHANGE 5 ─── */
+				border-bottom: 1px solid var(--border-color);
+				display: flex;
+				flex: 0 0 52px;
+				height: 52px;
+				justify-content: space-between;
+				padding: 0 12px 0 14px;
+			}
+
+			/* // ─── CHANGE 4: Inline Search Header Area ─── */
+			.frappe-ai-title-wrap {
+				display: grid;
+				flex: 1 1 auto;
+				min-width: 0;
+				overflow: hidden;
+			}
+
+			.frappe-ai-title,
+			.frappe-ai-searchbar {
+				grid-area: 1 / 1;
+				transition: opacity 180ms ease, transform 180ms ease;
+			}
+			/* // ─── END CHANGE 4 ─── */
+
+			.frappe-ai-title {
+				align-items: center;
+				color: var(--text-color);
+				display: flex;
+				font-size: var(--font-size-base);
+				font-weight: 600;
+				gap: 8px;
+				min-width: 0;
+			}
+
+			/* // ─── CHANGE 5: Connected Header Dot ─── */
+			.frappe-ai-status-dot {
+				background: var(--text-muted);
+				border-radius: 50%;
+				display: inline-flex;
+				flex: 0 0 6px;
+				height: 6px;
+				width: 6px;
+			}
+
+			.frappe-ai-status-dot.is-connected {
+				background: #29a329;
+			}
+			/* // ─── END CHANGE 5 ─── */
+
+			.frappe-ai-app-icon,
+			.frappe-ai-app-icon svg {
+				color: var(--primary-color);
+				display: block;
+				height: 20px;
+				width: 20px;
+			}
+
+			.frappe-ai-header-actions {
+				align-items: center;
+				display: flex;
+				gap: 4px;
+			}
+
+			/* // ─── CHANGE 4: Inline Search Bar ─── */
+			/* // ─── CHANGE 8: Header searchbar CSS removed — search moved to history drawer ─── */
+			/* // ─── END CHANGE 8 ─── */
+			/* // ─── END CHANGE 4 ─── */
+
+			.frappe-ai-icon-button,
+			.frappe-ai-bubble-action {
+				align-items: center;
+				background: transparent;
+				border: 0;
+				border-radius: var(--border-radius);
+				color: var(--text-muted);
+				cursor: pointer;
+				display: inline-flex;
+				height: 28px;
+				justify-content: center;
+				padding: 0;
+				transition: background 140ms ease, color 140ms ease;
+				width: 28px;
+			}
+
+			.frappe-ai-icon-button:hover,
+			.frappe-ai-bubble-action:hover {
+				background: var(--frappe-ai-hover);
+				color: var(--text-color);
+			}
+
+			.frappe-ai-icon-button svg,
+			.frappe-ai-bubble-action svg {
+				height: 16px;
+				width: 16px;
+			}
+
+			/* // ─── CHANGE 4: Messages Shell + History Drawer ─── */
+			.frappe-ai-messages-shell {
+				display: flex;
+				flex: 1 1 auto;
+				min-height: 0;
+				overflow: hidden;
+				position: relative;
+			}
+			/* // ─── END CHANGE 4 ─── */
+
+			.frappe-ai-messages {
+				background: var(--frappe-ai-canvas);
+				display: flex;
+				flex: 1 1 auto;
+				flex-direction: column;
+				gap: 12px;
+				overflow-y: auto;
+				padding: 16px;
+				scroll-behavior: smooth;
+				scrollbar-color: var(--scrollbar-thumb-color, var(--border-color)) var(--scrollbar-track-color, transparent);
+				scrollbar-width: thin;
+				width: 100%;
+			}
+
+			.frappe-ai-messages::-webkit-scrollbar {
+				width: 6px;
+			}
+
+			.frappe-ai-messages::-webkit-scrollbar-track {
+				background: transparent;
+			}
+
+			.frappe-ai-messages::-webkit-scrollbar-thumb {
+				background: var(--scrollbar-thumb-color, var(--border-color));
+				border-radius: 999px;
+			}
+
+			.frappe-ai-empty-state {
+				align-items: center;
+				color: var(--text-muted);
+				display: flex;
+				flex: 1;
+				flex-direction: column;
+				justify-content: center;
+				min-height: 100%;
+				text-align: center;
+			}
+
+			.frappe-ai-empty-icon {
+				align-items: center;
+				background: color-mix(in srgb, var(--primary-color) 10%, var(--frappe-ai-control));
+				border: 1px solid var(--border-color);
+				border-radius: 50%;
+				color: var(--primary-color);
+				display: flex;
+				height: 58px;
+				justify-content: center;
+				margin-bottom: 16px;
+				width: 58px;
+			}
+
+			.frappe-ai-empty-icon svg {
+				height: 30px;
+				width: 30px;
+			}
+
+			.frappe-ai-empty-state h2 {
+				color: var(--text-color);
+				font-size: 18px;
+				font-weight: 600;
+				letter-spacing: 0;
+				line-height: 1.3;
+				margin: 0 0 14px;
+			}
+
+			.frappe-ai-suggestions {
+				display: flex;
+				flex-wrap: wrap;
+				gap: 8px;
+				justify-content: center;
+				max-width: 300px;
+			}
+
+			.frappe-ai-suggestion-chip {
+				/* // ─── CHANGE 5: Suggestion Chip Polish ─── */
+				align-items: center;
+				background: transparent;
+				border: 1px solid var(--border-color);
+				border-radius: 20px;
+				color: var(--text-color);
+				cursor: pointer;
+				display: inline-flex;
+				font-size: var(--font-size-sm);
+				gap: 6px;
+				line-height: 1.3;
+				padding: 6px 14px;
+				transition: background 150ms ease, border-color 150ms ease, color 150ms ease;
+				/* // ─── END CHANGE 5 ─── */
+			}
+
+			.frappe-ai-suggestion-chip:hover {
+				/* // ─── CHANGE 5: Suggestion Chip Hover Polish ─── */
+				background: var(--frappe-ai-control);
+				border-color: var(--border-color);
+				color: var(--text-color);
+				/* // ─── END CHANGE 5 ─── */
+			}
+
+			/* // ─── CHANGE 5: Suggestion Chip Icons ─── */
+			.frappe-ai-suggestion-chip svg {
+				color: var(--primary-color);
+				flex: 0 0 14px;
+				height: 14px;
+				width: 14px;
+			}
+			/* // ─── END CHANGE 5 ─── */
+
+			.frappe-ai-message {
+				display: flex;
+				flex-direction: column;
+				width: 100%;
+			}
+
+			.frappe-ai-message.is-user {
+				align-items: flex-end;
+			}
+
+			.frappe-ai-message.is-assistant {
+				align-items: flex-start;
+			}
+
+			.frappe-ai-bubble {
+				border: 1px solid var(--border-color);
+				color: var(--text-color);
+				font-size: var(--font-size-base);
+				line-height: 1.45;
+				max-width: 85%;
+				min-width: 96px;
+				padding: 9px 10px 7px;
+			}
+
+			.frappe-ai-message.is-user .frappe-ai-bubble {
+				/* // ─── CHANGE 5: User Bubble Surface Match ─── */
+				background: var(--frappe-ai-raised);
+				border-color: var(--border-color);
+				border-right: 3px solid color-mix(in srgb, var(--primary-color) 30%, transparent);
+				border-radius: 12px 12px 2px 12px;
+				color: var(--text-color);
+				/* // ─── END CHANGE 5 ─── */
+				max-width: 80%;
+			}
+
+			.frappe-ai-message.is-assistant .frappe-ai-bubble {
+				background: var(--frappe-ai-raised);
+				border-radius: 12px 12px 12px 2px;
+				/* // ─── CHANGE 5: Assistant Accent Border ─── */
+				border-left: 3px solid color-mix(in srgb, var(--primary-color) 30%, transparent);
+				/* // ─── END CHANGE 5 ─── */
+				max-width: 85%;
+			}
+
+			.frappe-ai-bubble-meta {
+				align-items: center;
+				color: var(--text-muted);
+				display: flex;
+				font-size: var(--font-size-sm);
+				gap: 6px;
+				line-height: 1.2;
+				margin-bottom: 5px;
+			}
+
+			.frappe-ai-bubble-meta span:first-child {
+				font-weight: 600;
+			}
+
+			/* // ─── CHANGE 5: Timestamp Below Bubble ─── */
+			.frappe-ai-message-time {
+				color: var(--text-muted);
+				font-size: var(--font-size-sm);
+				line-height: 1.2;
+				margin-top: 2px;
+			}
+
+			.frappe-ai-message.is-user .frappe-ai-message-time {
+				text-align: right;
+			}
+
+			.frappe-ai-assistant-footer {
+				align-items: center;
+				display: flex;
+				gap: 6px;
+				justify-content: space-between;
+				margin-top: 2px;
+				max-width: 85%;
+				width: 100%;
+			}
+			/* // ─── END CHANGE 5 ─── */
+
+			.frappe-ai-bubble-content {
+				overflow-wrap: anywhere;
+			}
+
+			.frappe-ai-bubble-content > :first-child {
+				margin-top: 0;
+			}
+
+			.frappe-ai-bubble-content > :last-child {
+				margin-bottom: 0;
+			}
+
+			.frappe-ai-bubble-content p,
+			.frappe-ai-bubble-content ul,
+			.frappe-ai-bubble-content ol,
+			.frappe-ai-bubble-content table,
+			.frappe-ai-bubble-content pre {
+				margin: 0 0 8px;
+			}
+
+			.frappe-ai-bubble-content ul,
+			.frappe-ai-bubble-content ol {
+				padding-left: 18px;
+			}
+
+			.frappe-ai-bubble-content table {
+				border-collapse: collapse;
+				display: block;
+				font-size: var(--font-size-sm);
+				max-width: 100%;
+				overflow-x: auto;
+			}
+
+			.frappe-ai-bubble-content th,
+			.frappe-ai-bubble-content td {
+				border: 1px solid var(--border-color);
+				padding: 5px 7px;
+				text-align: left;
+				vertical-align: top;
+			}
+
+			.frappe-ai-bubble-content th {
+				background: var(--frappe-ai-control);
+				font-weight: 600;
+			}
+
+			.frappe-ai-code-wrap {
+				position: relative;
+			}
+
+			.frappe-ai-bubble-content pre {
+				background: var(--frappe-ai-control);
+				border: 1px solid var(--border-color);
+				border-radius: var(--border-radius);
+				overflow-x: auto;
+				padding: 28px 10px 10px;
+			}
+
+			.frappe-ai-bubble-content code {
+				font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+				font-size: var(--font-size-sm);
+			}
+
+			.frappe-ai-copy-code {
+				align-items: center;
+				background: var(--frappe-ai-raised);
+				border: 1px solid var(--border-color);
+				border-radius: var(--border-radius);
+				color: var(--text-muted);
+				cursor: pointer;
+				display: inline-flex;
+				font-size: var(--font-size-sm);
+				height: 24px;
+				justify-content: center;
+				line-height: 1;
+				padding: 0 7px;
+				position: absolute;
+				right: 6px;
+				top: 6px;
+			}
+
+			.frappe-ai-copy-code:hover {
+				color: var(--text-color);
+			}
+
+			.frappe-ai-bubble-footer {
+				align-items: center;
+				display: flex;
+				gap: 2px;
+				justify-content: flex-end;
+			}
+
+			/* // ─── CHANGE 4: Search Results + History Drawer Styles ─── */
+			.frappe-ai-search-results,
+			.frappe-ai-history-list {
+				display: flex;
+				flex-direction: column;
+				gap: 8px;
+				width: 100%;
+			}
+
+			.frappe-ai-search-empty {
+				align-items: center;
+				color: var(--text-muted);
+				display: flex;
+				flex: 1;
+				font-size: var(--font-size-base);
+				justify-content: center;
+				min-height: 100%;
+				text-align: center;
+			}
+
+			.frappe-ai-conversation-row {
+				background: transparent;
+				border: 1px solid var(--border-color);
+				border-radius: var(--border-radius);
+				color: var(--text-color);
+				cursor: pointer;
+				display: block;
+				font-family: var(--font-stack);
+				padding: 10px;
+				text-align: left;
+				transition: background 140ms ease, border-color 140ms ease;
+				width: 100%;
+			}
+
+			.frappe-ai-conversation-row:hover,
+			.frappe-ai-conversation-row.is-active {
+				background: color-mix(in srgb, var(--primary-color) 8%, var(--frappe-ai-control));
+				border-color: color-mix(in srgb, var(--primary-color) 24%, var(--border-color));
+			}
+
+			.frappe-ai-conversation-title {
+				font-size: var(--font-size-base);
+				font-weight: 600;
+				line-height: 1.3;
+				margin-bottom: 4px;
+			}
+
+			.frappe-ai-conversation-snippet {
+				color: var(--text-muted);
+				font-size: var(--font-size-sm);
+				line-height: 1.35;
+				margin-bottom: 4px;
+			}
+
+			.frappe-ai-conversation-time {
+				color: var(--text-muted);
+				font-size: var(--font-size-sm);
+				line-height: 1.2;
+			}
+
+			.frappe-ai-history-drawer {
+				background: var(--frappe-ai-canvas);
+				border-right: 1px solid var(--border-color);
+				bottom: 0;
+				display: flex;
+				flex-direction: column;
+				left: 0;
+				padding: 12px;
+				position: absolute;
+				top: 0;
+				transform: translateX(-100%);
+				transition: transform 220ms ease-out;
+				width: 100%;
+				z-index: 1;
+			}
+
+			.frappe-ai-history-drawer.is-open {
+				transform: translateX(0);
+			}
+
+			.frappe-ai-history-header {
+				align-items: center;
+				display: flex;
+				flex: 0 0 auto;
+				justify-content: space-between;
+				margin-bottom: 12px;
+			}
+
+			/* // ─── CHANGE 4: New Conversation Button + Major Element Separation ─── */
+			.frappe-ai-history-primary-new {
+				align-items: center;
+				background: color-mix(in srgb, var(--primary-color) 10%, var(--frappe-ai-raised));
+				border: 1px solid color-mix(in srgb, var(--primary-color) 22%, var(--border-color));
+				border-radius: var(--border-radius);
+				color: var(--text-color);
+				cursor: pointer;
+				display: inline-flex;
+				flex: 0 0 auto;
+				font-family: var(--font-stack);
+				font-size: var(--font-size-base);
+				font-weight: 600;
+				gap: 8px;
+				justify-content: center;
+				margin-bottom: 12px;
+				padding: 9px 10px;
+				transition: background 150ms ease, border-color 150ms ease, transform 150ms ease;
+				width: 100%;
+			}
+
+			.frappe-ai-history-primary-new:hover {
+				background: color-mix(in srgb, var(--primary-color) 16%, var(--frappe-ai-raised));
+				border-color: color-mix(in srgb, var(--primary-color) 34%, var(--border-color));
+				transform: translateY(-1px);
+			}
+
+			.frappe-ai-history-primary-new svg {
+				height: 15px;
+				width: 15px;
+			}
+			/* // ─── END CHANGE 4 ─── */
+
+			.frappe-ai-history-list {
+				flex: 1 1 auto;
+				overflow-y: auto;
+			}
+
+			/* // ─── CHANGE 8: Drawer Search Input + Footer Layout ─── */
+			.frappe-ai-history-footer {
+				display: flex;
+				flex: 0 0 auto;
+				flex-direction: column;
+				padding-top: 10px;
+			}
+
+			.frappe-ai-drawer-search-input {
+				background: var(--bg-color);
+				border: 1px solid var(--border-color);
+				border-radius: 6px;
+				box-sizing: border-box;
+				color: var(--text-color);
+				flex: 0 0 auto;
+				font-family: var(--font-stack);
+				font-size: var(--font-size-sm);
+				margin-bottom: 8px;
+				outline: none;
+				padding: 7px 10px;
+				width: 100%;
+			}
+
+			.frappe-ai-drawer-search-input:focus {
+				box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary-color) 25%, transparent);
+			}
+
+			.frappe-ai-drawer-search-empty {
+				color: var(--text-muted);
+				font-size: var(--font-size-sm);
+				padding: 12px 0;
+				text-align: center;
+			}
+			/* // ─── END CHANGE 8 ─── */
+
+			/* // ─── END CHANGE 4 ─── */
+
+			.frappe-ai-stream-cursor {
+				animation: frappe-ai-cursor-blink 1s steps(2, start) infinite;
+				color: var(--primary-color);
+				font-weight: 600;
+				margin-left: 1px;
+			}
+
+			.frappe-ai-typing {
+				align-items: center;
+				display: inline-flex;
+				gap: 4px;
+				height: 18px;
+			}
+
+			.frappe-ai-typing span {
+				animation: frappe-ai-dot-bounce 900ms infinite ease-in-out;
+				background: var(--text-muted);
+				border-radius: 50%;
+				height: 6px;
+				width: 6px;
+			}
+
+			.frappe-ai-typing span:nth-child(2) {
+				animation-delay: 120ms;
+			}
+
+			.frappe-ai-typing span:nth-child(3) {
+				animation-delay: 240ms;
+			}
+
+			.frappe-ai-input-area {
+				background: var(--frappe-ai-raised);
+				/* // ─── CHANGE 5: Input Separator Polish ─── */
+				border-top: 1px solid var(--border-color);
+				/* // ─── END CHANGE 5 ─── */
+				flex: 0 0 auto;
+				margin: 0;
+				padding: 10px 12px 9px;
+			}
+
+			.frappe-ai-input-row {
+				align-items: flex-end;
+				display: flex;
+				/* // ─── CHANGE 2: Input Row Control Spacing ─── */
+				gap: 6px;
+				/* // ─── END CHANGE 2 ─── */
+			}
+
+			/* // ─── CHANGE 2: Voice + Attachment Button Styles ─── */
+			.frappe-ai-input-icon-button {
+				align-items: center;
+				background: transparent;
+				border: 0;
+				border-radius: 50%;
+				color: var(--text-muted);
+				cursor: pointer;
+				display: inline-flex;
+				flex: 0 0 32px;
+				height: 32px;
+				justify-content: center;
+				padding: 0;
+				transition: background 140ms ease, color 140ms ease, transform 140ms ease;
+				width: 32px;
+			}
+
+			.frappe-ai-input-icon-button:hover {
+				background: var(--frappe-ai-hover);
+				color: var(--text-color);
+			}
+
+			.frappe-ai-input-icon-button svg {
+				height: 16px;
+				width: 16px;
+			}
+
+			.frappe-ai-input-icon-button.is-recording {
+				animation: recordingPulse 800ms infinite;
+				background: color-mix(in srgb, #e03636 10%, transparent);
+				color: #e03636;
+			}
+
+			.frappe-ai-attachment-pill {
+				display: none;
+				margin-bottom: 8px;
+			}
+
+			.frappe-ai-attachment-pill.has-attachment {
+				display: flex;
+			}
+
+			.frappe-ai-attachment-chip {
+				align-items: center;
+				background: var(--frappe-ai-raised);
+				border: 1px solid var(--border-color);
+				border-radius: 4px;
+				color: var(--text-color);
+				display: inline-flex;
+				font-size: var(--font-size-sm);
+				gap: 6px;
+				max-width: 100%;
+				padding: 4px 7px;
+			}
+
+			.frappe-ai-attachment-name {
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+			}
+
+			.frappe-ai-attachment-remove {
+				background: transparent;
+				border: 0;
+				color: var(--text-muted);
+				cursor: pointer;
+				font-size: var(--font-size-base);
+				line-height: 1;
+				padding: 0 2px;
+			}
+			/* // ─── END CHANGE 2 ─── */
+
+			/* // ─── CHANGE 5: Textarea Focus Ring Wrapper ─── */
+			.frappe-ai-textarea-wrap {
+				border-radius: var(--border-radius);
+				display: flex;
+				flex: 1 1 auto;
+				min-width: 0;
+				transition: box-shadow 140ms ease;
+			}
+
+			.frappe-ai-textarea-wrap:focus-within {
+				box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary-color) 25%, transparent);
+			}
+			/* // ─── END CHANGE 5 ─── */
+
+			.frappe-ai-textarea {
+				background: var(--frappe-ai-control);
+				border: 1px solid var(--border-color);
+				border-radius: var(--border-radius);
+				color: var(--text-color);
+				flex: 1 1 auto;
+				font-family: var(--font-stack);
+				font-size: var(--font-size-base);
+				line-height: 20px;
+				max-height: 76px;
+				min-height: 38px;
+				outline: none;
+				padding: 8px 10px;
+				resize: none;
+				width: 100%;
+			}
+
+			.frappe-ai-textarea::placeholder {
+				color: var(--text-muted);
+			}
+
+			.frappe-ai-textarea:disabled {
+				cursor: not-allowed;
+				opacity: 0.7;
+			}
+
+			.frappe-ai-send-button {
+				align-items: center;
+				background: var(--btn-primary, var(--primary-color));
+				border: 0;
+				border-radius: 50%;
+				color: var(--frappe-ai-on-primary);
+				cursor: pointer;
+				display: inline-flex;
+				flex: 0 0 38px;
+				height: 38px;
+				justify-content: center;
+				padding: 0;
+				transition: opacity 140ms ease, transform 140ms ease, background 140ms ease, color 140ms ease;
+				width: 38px;
+			}
+
+			.frappe-ai-send-button:hover {
+				transform: translateY(-1px);
+			}
+
+			.frappe-ai-send-button:disabled {
+				cursor: not-allowed;
+				opacity: 0.65;
+				transform: none;
+			}
+
+			.frappe-ai-send-button.is-stop {
+				background: color-mix(in srgb, var(--red-500, var(--primary-color)) 12%, var(--frappe-ai-raised));
+				border: 1px solid color-mix(in srgb, var(--red-500, var(--primary-color)) 30%, var(--border-color));
+				color: var(--red-500, var(--primary-color));
+			}
+
+			.frappe-ai-send-button svg {
+				height: 17px;
+				width: 17px;
+			}
+
+			.frappe-ai-token-counter {
+				color: var(--text-muted);
+				font-size: var(--font-size-sm);
+				line-height: 1.2;
+				margin-top: 5px;
+				min-height: 15px;
+				text-align: right;
+			}
+
+			@keyframes frappe-ai-cursor-blink {
+				0%,
+				45% {
+					opacity: 1;
+				}
+				46%,
+				100% {
+					opacity: 0;
+				}
+			}
+
+			@keyframes frappe-ai-dot-bounce {
+				0%,
+				80%,
+				100% {
+					transform: translateY(0);
+				}
+				40% {
+					transform: translateY(-4px);
+				}
+			}
+
+			/* // ─── CHANGE 2: Recording Pulse Animation ─── */
+			@keyframes recordingPulse {
+				0%,
+				100% {
+					transform: scale(1);
+				}
+				50% {
+					transform: scale(1.15);
+				}
+			}
+			/* // ─── END CHANGE 2 ─── */
+
+			@media (max-width: 768px) {
+				.frappe-ai-panel {
+					bottom: 80px;
+					height: 70vh;
+					/* // ─── CHANGE 1: Bottom-Right Mobile Reposition ─── */
+					right: 16px;
+					/* // ─── END CHANGE 1 ─── */
+					width: calc(100vw - 32px);
+				}
+
+				/* Mobile full-screen: fills viewport but keeps all header UI unchanged */
+				.frappe-ai-panel.is-expanded {
+					bottom: 0;
+					border-radius: 0;
+					box-shadow: none;
+					height: 100dvh;
+					left: 0;
+					right: 0;
+					top: 0;
+					width: 100dvw;
+					z-index: 9999;
+				}
+
+				.frappe-ai-chat-root.is-expanded .frappe-ai-fab {
+					display: none;
+				}
+			}
+
+			@supports not (height: 100dvh) {
+				@media (max-width: 768px) {
+					.frappe-ai-panel.is-expanded {
+						height: 100vh;
+						width: 100vw;
+					}
+				}
+			}
+		`;
+		document.head.appendChild(dom.style);
+	}
+
+	// ─── EVENT HANDLERS ──────────────────────────────────────────────────────────
+	function bindEvents() {
+		dom.fab.addEventListener("click", handleToggle);
+		dom.fab.addEventListener("keydown", handleFabKeydown);
+		dom.closeButton.addEventListener("click", close);
+		dom.newChatButton.addEventListener("click", handleNewChat);
+		// ─── CHANGE 2: Voice + Attachment Event Bindings ───
+		dom.micButton.addEventListener("click", handleVoiceToggle);
+		dom.attachButton.addEventListener("click", handleAttachClick);
+		dom.fileInput.addEventListener("change", handleFileSelected);
+		dom.attachmentPill.addEventListener("click", handleAttachmentPillClick);
+		// ─── END CHANGE 2 ───
+		// ─── CHANGE 3: Expand Event Binding ───
+		dom.expandButton.addEventListener("click", handleExpandToggle);
+		// ─── END CHANGE 3 ───
+		// ─── CHANGE 4: Search + History Event Bindings ───
+		dom.historyButton.addEventListener("click", handleHistoryToggle);
+		// ─── CHANGE 8: Drawer search replaces header search bindings ───
+		dom.drawerSearchInput.addEventListener("input", handleSearchInput);
+		dom.drawerSearchInput.addEventListener("keydown", handleSearchKeydown);
+		// ─── END CHANGE 8 ───
+		dom.historyCloseButton.addEventListener("click", handleHistoryClose);
+		dom.historyNewChatButton.addEventListener("click", handleNewChat);
+		dom.historyList.addEventListener("click", handleConversationListClick);
+		// ─── END CHANGE 4 ───
+		dom.textarea.addEventListener("input", handleTextareaInput);
+		dom.textarea.addEventListener("keydown", handleTextareaKeydown);
+		dom.sendButton.closest("form").addEventListener("submit", handleSubmit);
+		dom.sendButton.addEventListener("click", handleSendButtonClick);
+		dom.panel.addEventListener("keydown", handlePanelKeydown);
+		dom.messagesArea.addEventListener("click", handleMessagesClick);
+	}
+
+	function handleToggle() {
+		if (state.isOpen) {
+			close();
+			return;
+		}
+
+		open();
+	}
+
+	function handleFabKeydown(event) {
+		if (event.key !== "Enter" && event.key !== " ") {
+			return;
+		}
+
+		event.preventDefault();
+		handleToggle();
+	}
+
+	function handleNewChat() {
+		if (state.isStreaming) {
+			stopStreaming();
+		}
+		setState({ type: "NEW_CHAT" });
+		// ─── CHANGE 2: Reset File Input On New Chat ───
+		dom.fileInput.value = "";
+		// ─── END CHANGE 2 ───
+		resetComposer();
+		dom.textarea.focus();
+	}
+
+	// ─── CHANGE 2: Voice + Attachment Event Handlers ───
+	function handleVoiceToggle() {
+		setState({ type: "TOGGLE_RECORDING" });
+		if (window.frappe?.show_alert) {
+			frappe.show_alert("Voice input coming soon", 2);
+		}
+	}
+
+	function handleAttachClick() {
+		dom.fileInput.click();
+	}
+
+	function handleFileSelected() {
+		const file = dom.fileInput.files?.[0];
+		if (!file) {
+			return;
+		}
+
+		setState({
+			type: "SET_ATTACHMENT",
+			attachment: {
+				name: file.name,
+				file,
+			},
+		});
+	}
+
+	function handleAttachmentPillClick(event) {
+		if (!event.target.closest("[data-remove-attachment]")) {
+			return;
+		}
+
+		dom.fileInput.value = "";
+		setState({ type: "CLEAR_ATTACHMENT" });
+	}
+	// TODO: API — upload attachment before sending message
+	// ─── END CHANGE 2 ───
+
+	// ─── CHANGE 3: Expand Event Handler ───
+	function handleExpandToggle() {
+		animateExpandedTransition(() => {
+			setState({ type: "TOGGLE_EXPANDED" });
+		});
+	}
+	// ─── END CHANGE 3 ───
+
+	// ─── CHANGE 4: Search + History Event Handlers ───
+	// ─── CHANGE 8: handleSearchOpen removed — search is always visible in drawer ───
+	function handleSearchClose() {
+		setState({ type: "CLOSE_SEARCH" });
+		dom.textarea.focus();
+	}
+
+	function handleSearchInput() {
+		// ─── CHANGE 8: Read from drawer search input instead of header search ───
+		setState({ type: "SET_SEARCH_QUERY", searchQuery: dom.drawerSearchInput.value });
+		// ─── END CHANGE 8 ───
+	}
+
+	function handleSearchKeydown(event) {
+		if (event.key !== "Escape") {
+			return;
+		}
+
+		event.preventDefault();
+		handleSearchClose();
+	}
+
+	function handleHistoryToggle() {
+		setState({ type: "TOGGLE_HISTORY" });
+	}
+
+	function handleHistoryClose() {
+		setState({ type: "CLOSE_HISTORY" });
+	}
+
+	function handleConversationListClick(event) {
+		const row = event.target.closest("[data-conversation-id]");
+		if (!row) {
+			return;
+		}
+
+		setState({
+			type: "SELECT_CONVERSATION",
+			conversationId: row.getAttribute("data-conversation-id"),
+		});
+	}
+	// TODO: API — replace with server-side search in v2
+	// ─── END CHANGE 4 ───
+
+	function handleTextareaInput() {
+		resizeTextarea();
+		updateTokenCounter();
+	}
+
+	function handleTextareaKeydown(event) {
+		if (event.key !== "Enter" || event.shiftKey) {
+			return;
+		}
+
+		event.preventDefault();
+		submitPrompt();
+	}
+
+	function handleSubmit(event) {
+		event.preventDefault();
+		submitPrompt();
+	}
+
+	function handleSendButtonClick(event) {
+		if (!state.isStreaming) {
+			return;
+		}
+
+		event.preventDefault();
+		stopStreaming();
+	}
+
+	function handlePanelKeydown(event) {
+		if (event.key === "Escape") {
+			event.preventDefault();
+			// ─── CHANGE 3: Escape Collapses Expanded Before Closing ───
+			if (state.isExpanded) {
+				animateExpandedTransition(() => {
+					setState({ type: "COLLAPSE_EXPANDED" });
+				});
+				return;
+			}
+			// ─── END CHANGE 3 ───
+			close();
+			return;
+		}
+
+		if (event.key === "Tab") {
+			trapFocus(event);
+		}
+	}
+
+	function handleMessagesClick(event) {
+		const codeCopyButton = event.target.closest("[data-copy-code]");
+		if (codeCopyButton) {
+			copyCodeBlock(codeCopyButton);
+			return;
+		}
+
+		const bubbleCopyButton = event.target.closest("[data-copy-message]");
+		if (bubbleCopyButton) {
+			copyAssistantMessage(bubbleCopyButton);
+			return;
+		}
+
+		if (event.target.closest("[data-regenerate-message]")) {
+			_log("Regenerate clicked; v1 renders the control only.");
+			return;
+		}
+
+		const suggestion = event.target.closest("[data-suggestion]");
+		if (suggestion) {
+			const prompt = suggestion.getAttribute("data-suggestion") || "";
+			dom.textarea.value = prompt;
+			handleTextareaInput();
+			submitPrompt();
+		}
+
+		// ─── CHANGE 4: Search Result Selection ───
+		const conversationResult = event.target.closest("[data-conversation-id]");
+		if (conversationResult) {
+			setState({
+				type: "SELECT_CONVERSATION",
+				conversationId: conversationResult.getAttribute("data-conversation-id"),
+			});
+		}
+		// ─── END CHANGE 4 ───
+	}
+
+	function submitPrompt() {
+		const prompt = dom.textarea.value.trim();
+		if (!prompt || state.isStreaming) {
+			return;
+		}
+
+		let conversationId = getActiveConversationId();
+		const userMessage = createMessage("user", prompt);
+
+		if (!conversationId) {
+			const conversation = createConversation({ initialMessage: userMessage });
+			conversationId = conversation.id;
+			setState({ type: "ADD_CONVERSATION", conversation }, { skipRender: true });
+		} else {
+			setState({ type: "ADD_MESSAGE", conversationId, message: userMessage }, { skipRender: true });
+		}
+
+		resetComposer();
+		setState({ type: "SHOW_TYPING" });
+		startAssistantTurn(conversationId, prompt);
+	}
+
+	function trapFocus(event) {
+		const focusableElements = getFocusableElements();
+		if (!focusableElements.length) {
+			return;
+		}
+
+		const firstElement = focusableElements[0];
+		const lastElement = focusableElements[focusableElements.length - 1];
+
+		if (event.shiftKey && document.activeElement === firstElement) {
+			event.preventDefault();
+			lastElement.focus();
+			return;
+		}
+
+		if (!event.shiftKey && document.activeElement === lastElement) {
+			event.preventDefault();
+			firstElement.focus();
+		}
+	}
+
+	function getFocusableElements() {
+		return Array.from(
+			dom.panel.querySelectorAll(
+				'button:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
+			)
+		).filter((element) => {
+			return element.offsetParent !== null;
+		});
+	}
+
+	function resizeTextarea() {
+		dom.textarea.style.height = "auto";
+		dom.textarea.style.height = `${Math.min(dom.textarea.scrollHeight, 76)}px`;
+	}
+
+	function updateTokenCounter() {
+		const tokenCount = Math.ceil(dom.textarea.value.length / 4);
+		dom.tokenCounter.textContent = `~${tokenCount} tokens`;
+	}
+
+	function resetComposer() {
+		dom.textarea.value = "";
+		handleTextareaInput();
+	}
+
+	// ─── CHANGE 3: Smooth Full-Screen FLIP Animation ───
+	function animateExpandedTransition(updateState) {
+		if (!dom.panel || !state.isOpen) {
+			updateState();
+			return;
+		}
+
+		if (panelAnimation) {
+			panelAnimation.cancel();
+			panelAnimation = null;
+		}
+
+		const isCollapsing = state.isExpanded;
+		if (isCollapsing) {
+			animateCollapseToPopover(updateState);
+			return;
+		}
+
+		const firstRect = dom.panel.getBoundingClientRect();
+		updateState();
+
+		window.requestAnimationFrame(() => {
+			const lastRect = dom.panel.getBoundingClientRect();
+			const scaleX = firstRect.width / Math.max(lastRect.width, 1);
+			const scaleY = firstRect.height / Math.max(lastRect.height, 1);
+			const deltaX = firstRect.left - lastRect.left;
+			const deltaY = firstRect.top - lastRect.top;
+
+			panelAnimation = dom.panel.animate(
+				[
+					{
+						transform: `translate(${deltaX}px, ${deltaY}px) scale(${scaleX}, ${scaleY})`,
+						transformOrigin: "top left",
+						borderRadius: state.isExpanded ? "12px" : "0",
+						boxShadow: isCollapsing
+							? "none"
+							: "var(--shadow-base), 0 8px 32px var(--frappe-ai-shadow-color)",
+					},
+					{
+						transform: "translate(0, 0) scale(1, 1)",
+						transformOrigin: "top left",
+					borderRadius: state.isExpanded ? "0" : "12px",
+						boxShadow: state.isExpanded
+							? "none"
+							: "var(--shadow-base), 0 8px 32px var(--frappe-ai-shadow-color)",
+					},
+				],
+				{
+					duration: 320,
+					easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+				}
+			);
+			panelAnimation.onfinish = () => {
+				panelAnimation = null;
+			};
+			panelAnimation.oncancel = () => {
+				panelAnimation = null;
+			};
+		});
+	}
+
+	function animateCollapseToPopover(updateState) {
+		const firstRect = dom.panel.getBoundingClientRect();
+		const targetRect = getPopoverPanelRect();
+
+		dom.panel.style.top = `${firstRect.top}px`;
+		dom.panel.style.left = `${firstRect.left}px`;
+		dom.panel.style.right = "auto";
+		dom.panel.style.bottom = "auto";
+		dom.panel.style.width = `${firstRect.width}px`;
+		dom.panel.style.height = `${firstRect.height}px`;
+		dom.panel.style.transform = "none";
+		dom.panel.style.borderRadius = "0";
+		dom.panel.style.boxShadow = "none";
+
+		updateState();
+
+		window.requestAnimationFrame(() => {
+			panelAnimation = dom.panel.animate(
+				[
+					{
+						top: `${firstRect.top}px`,
+						left: `${firstRect.left}px`,
+						width: `${firstRect.width}px`,
+						height: `${firstRect.height}px`,
+						borderRadius: "0",
+						boxShadow: "none",
+					},
+					{
+						top: `${targetRect.top}px`,
+						left: `${targetRect.left}px`,
+						width: `${targetRect.width}px`,
+						height: `${targetRect.height}px`,
+						borderRadius: "12px",
+						boxShadow:
+							"var(--shadow-base), 0 8px 32px var(--frappe-ai-shadow-color)",
+					},
+				],
+				{
+					duration: 300,
+					easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+				}
+			);
+			panelAnimation.onfinish = cleanupPanelBoundsAnimation;
+			panelAnimation.oncancel = cleanupPanelBoundsAnimation;
+		});
+	}
+
+	function cleanupPanelBoundsAnimation() {
+		panelAnimation = null;
+		dom.panel.style.top = "";
+		dom.panel.style.left = "";
+		dom.panel.style.right = "";
+		dom.panel.style.bottom = "";
+		dom.panel.style.width = "";
+		dom.panel.style.height = "";
+		dom.panel.style.transform = "";
+		dom.panel.style.borderRadius = "";
+		dom.panel.style.boxShadow = "";
+	}
+
+	function getPopoverPanelRect() {
+		const isMobile = window.matchMedia("(max-width: 768px)").matches;
+		const viewportWidth = window.innerWidth;
+		const viewportHeight = window.innerHeight;
+		const right = isMobile ? 16 : 24;
+		const bottom = isMobile ? 80 : 88;
+		const width = isMobile ? viewportWidth - 32 : 380;
+		const height = isMobile ? viewportHeight * 0.7 : 560;
+
+		return {
+			height,
+			left: viewportWidth - right - width,
+			top: viewportHeight - bottom - height,
+			width,
+		};
+	}
+	// ─── END CHANGE 3 ───
+
+	// ─── STREAM ENGINE ───────────────────────────────────────────────────────────
+	function startAssistantTurn(conversationId, prompt) {
+		const response = getAssistantResponse({ prompt, conversation: getActiveConversation() });
+
+		typingTimeout = window.setTimeout(() => {
+			typingTimeout = null;
+			const assistantMessage = createMessage("assistant", "", {
+				isStreaming: true,
+			});
+
+			const interval = streamText({
+				conversationId,
+				text: response,
+			});
+
+			setState({
+				type: "START_STREAM",
+				conversationId,
+				message: assistantMessage,
+				streamInterval: interval,
+			});
+		}, TYPING_DELAY_MS);
+	}
+
+	function streamText(options) {
+		const characters = Array.from(options.text);
+		let index = 0;
+
+		const interval = window.setInterval(() => {
+			if (index >= characters.length) {
+				window.clearInterval(interval);
+				setState({ type: "FINISH_STREAM", conversationId: options.conversationId });
+				return;
+			}
+
+			setState({
+				type: "APPEND_STREAM_CHUNK",
+				conversationId: options.conversationId,
+				chunk: characters[index],
+			});
+			index += 1;
+		}, STREAM_DELAY_MS);
+
+		return interval;
+	}
+
+	function stopStreaming() {
+		if (typingTimeout) {
+			window.clearTimeout(typingTimeout);
+			typingTimeout = null;
+		}
+
+		if (state.streamInterval) {
+			window.clearInterval(state.streamInterval);
+		}
+
+		setState({
+			type: "STOP_STREAM",
+			conversationId: getActiveConversationId(),
+		});
+	}
+
+	// ─── RENDER ──────────────────────────────────────────────────────────────────
+	function render() {
+		if (!dom.root) {
+			return;
+		}
+
+		renderShell();
+		renderMessages();
+		// ─── CHANGE 4: Render History Drawer ───
+		renderHistoryDrawer();
+		// ─── END CHANGE 4 ───
+		renderComposer();
+	}
+
+	function renderShell() {
+		// ─── CHANGE 3: Expanded Shell Class + Header Icon ───
+		dom.root.classList.toggle("is-expanded", state.isExpanded);
+		dom.panel.classList.toggle("is-expanded", state.isExpanded);
+		// ─── CHANGE 6: fai-expanded on panel for new-chat/history hide ───
+		dom.panel.classList.toggle("fai-expanded", state.isExpanded);
+		// ─── END CHANGE 6 ───
+		dom.expandButton.setAttribute("aria-label", state.isExpanded ? "Collapse Chat" : "Expand Chat");
+		dom.expandButton.innerHTML = state.isExpanded ? getIcon("collapse") : getIcon("expand");
+		// ─── END CHANGE 3 ───
+		// ─── CHANGE 4: Search + History Shell Classes ───
+		dom.historyDrawer.classList.toggle("is-open", state.isHistoryOpen);
+		// ─── CHANGE 8: Sync drawer search input value (header search removed) ───
+		if (dom.drawerSearchInput && dom.drawerSearchInput.value !== state.searchQuery) {
+			dom.drawerSearchInput.value = state.searchQuery;
+		}
+		// ─── END CHANGE 8 ───
+		// ─── END CHANGE 4 ───
+		// ─── CHANGE 5: Connected Header Dot Render ───
+		dom.root
+			.querySelector(".frappe-ai-status-dot")
+			?.classList.toggle("is-connected", Boolean(state.isConnected));
+		// ─── END CHANGE 5 ───
+		dom.panel.classList.toggle("is-open", state.isOpen);
+		dom.fab.setAttribute("aria-expanded", state.isOpen ? "true" : "false");
+		dom.fab.setAttribute("aria-label", state.isOpen ? "Close AI Assistant" : "Open AI Assistant");
+		dom.fabIcon.innerHTML = state.isOpen ? getIcon("chevron") : getIcon("chat");
+		dom.badge.classList.toggle("is-visible", Boolean(state.hasUnread && !state.isOpen));
+	}
+
+	function renderMessages() {
+		const conversation = getActiveConversation();
+		const messages = conversation?.messages || [];
+
+		dom.messagesArea.innerHTML = "";
+
+		// ─── CHANGE 4: Render Search Results In Messages Area ───
+		// ─── CHANGE 8: Search results moved to history drawer — no longer rendered in messages area ───
+		// ─── END CHANGE 8 ───
+		// ─── END CHANGE 4 ───
+
+		if (!messages.length && !state.isTyping) {
+			dom.messagesArea.appendChild(buildEmptyState());
+			return;
+		}
+
+		messages.forEach((message) => {
+			dom.messagesArea.appendChild(buildMessageElement(message));
+		});
+
+		if (state.isTyping) {
+			dom.messagesArea.appendChild(buildTypingIndicator());
+		}
+
+		dom.messagesArea.scrollTop = dom.messagesArea.scrollHeight;
+	}
+
+	function renderComposer() {
+		const isStreaming = state.isStreaming;
+
+		// ─── CHANGE 2: Render Voice + Attachment Composer State ───
+		dom.micButton.classList.toggle("is-recording", state.isRecording);
+		renderAttachmentPill();
+		// ─── END CHANGE 2 ───
+		dom.textarea.disabled = isStreaming;
+		dom.sendButton.disabled = false;
+		dom.sendButton.classList.toggle("is-stop", isStreaming);
+		dom.sendButton.setAttribute("aria-label", isStreaming ? "Stop Response" : "Send Message");
+		dom.sendButton.innerHTML = isStreaming ? getIcon("stop") : getIcon("send");
+	}
+
+	// ─── CHANGE 2: Render Attachment Pill ───
+	function renderAttachmentPill() {
+		const attachment = state.pendingAttachment;
+		dom.attachmentPill.classList.toggle("has-attachment", Boolean(attachment));
+
+		if (!attachment) {
+			dom.attachmentPill.innerHTML = "";
+			return;
+		}
+
+		dom.attachmentPill.innerHTML = `
+			<span class="frappe-ai-attachment-chip">
+				<span class="frappe-ai-attachment-name">${escapeHtml(attachment.name)}</span>
+				<button class="frappe-ai-attachment-remove" type="button" data-remove-attachment aria-label="Remove attachment">×</button>
+			</span>
+		`;
+	}
+	// TODO: API — upload attachment before sending message
+	// ─── END CHANGE 2 ───
+
+	// ─── CHANGE 4: Render History Drawer ───
+	// ─── CHANGE 8: renderSearchResults removed — filtering now happens inside renderHistoryDrawer ───
+	function renderHistoryDrawer() {
+		// ─── CHANGE 8: Filter conversation list by drawer search query ───
+		const query = state.searchQuery.trim().toLowerCase();
+		const conversations = query
+			? state.conversations.filter((conversation) =>
+				`${conversation.title} ${conversation.last_message}`.toLowerCase().includes(query)
+			)
+			: state.conversations;
+
+		dom.historyList.innerHTML = "";
+		if (!conversations.length) {
+			dom.historyList.innerHTML = '<div class="frappe-ai-drawer-search-empty">No results</div>';
+			return;
+		}
+		conversations.forEach((conversation) => {
+			dom.historyList.appendChild(buildConversationRow(conversation));
+		});
+		// ─── END CHANGE 8 ───
+	}
+
+	function buildConversationRow(conversation) {
+		const row = document.createElement("button");
+		row.type = "button";
+		row.className = "frappe-ai-conversation-row";
+		row.classList.toggle("is-active", conversation.id === state.activeConversationId);
+		row.setAttribute("data-conversation-id", conversation.id);
+		row.innerHTML = `
+			<div class="frappe-ai-conversation-title">${escapeHtml(conversation.title)}</div>
+			<div class="frappe-ai-conversation-snippet">${escapeHtml(truncateText(conversation.last_message, 60))}</div>
+			<div class="frappe-ai-conversation-time">${escapeHtml(conversation.timestamp || "")}</div>
+		`;
+		return row;
+	}
+	// TODO: API — replace with server-side search in v2
+	// ─── END CHANGE 4 ───
+
+	function buildEmptyState() {
+		const emptyState = document.createElement("div");
+		emptyState.className = "frappe-ai-empty-state";
+		emptyState.innerHTML = `
+			<div class="frappe-ai-empty-icon" aria-hidden="true">${getIcon("brain")}</div>
+			<h2>How can I help you?</h2>
+			<div class="frappe-ai-suggestions">
+				${SUGGESTIONS.map((suggestion, index) => {
+					// ─── CHANGE 5: Suggestion Chip Icons ───
+					const icons = ["checklist", "barChart", "inbox"];
+					return `<button class="frappe-ai-suggestion-chip" type="button" data-suggestion="${escapeAttribute(
+						suggestion
+					)}">${getIcon(icons[index])}${escapeHtml(suggestion)}</button>`;
+					// ─── END CHANGE 5 ───
+				}).join("")}
+			</div>
+		`;
+		return emptyState;
+	}
+
+	function buildTypingIndicator() {
+		const wrapper = document.createElement("div");
+		wrapper.className = "frappe-ai-message is-assistant";
+		wrapper.innerHTML = `
+			<div class="frappe-ai-bubble">
+				<div class="frappe-ai-bubble-meta">
+					<span>Frappe AI</span>
+				</div>
+				<div class="frappe-ai-typing" aria-label="Frappe AI is typing">
+					<span></span><span></span><span></span>
+				</div>
+			</div>
+			<div class="frappe-ai-message-time">just now</div>
+		`;
+		return wrapper;
+	}
+
+	function buildMessageElement(message) {
+		const wrapper = document.createElement("div");
+		const isAssistant = message.role === "assistant";
+		wrapper.className = `frappe-ai-message is-${message.role}`;
+		wrapper.innerHTML = `
+			<div class="frappe-ai-bubble">
+				<div class="frappe-ai-bubble-meta">
+					<span>${isAssistant ? "Frappe AI" : "You"}</span>
+				</div>
+				<div class="frappe-ai-bubble-content"></div>
+			</div>
+			${
+				isAssistant
+					? `<div class="frappe-ai-assistant-footer">
+						<div class="frappe-ai-message-time">${escapeHtml(getRelativeTimestamp(message))}</div>
+						<div class="frappe-ai-bubble-footer">
+							<button class="frappe-ai-bubble-action" type="button" data-copy-message="${escapeAttribute(
+								message.id
+							)}" aria-label="Copy Message">${getIcon("copy")}</button>
+							<button class="frappe-ai-bubble-action" type="button" data-regenerate-message="${escapeAttribute(
+								message.id
+							)}" aria-label="Regenerate Response">${getIcon("regenerate")}</button>
+						</div>
+					</div>`
+					: `<div class="frappe-ai-message-time">${escapeHtml(getRelativeTimestamp(message))}</div>`
+			}
+		`;
+
+		const content = wrapper.querySelector(".frappe-ai-bubble-content");
+		content.innerHTML = renderMarkdown(message.content);
+		if (message.isStreaming) {
+			content.insertAdjacentHTML("beforeend", '<span class="frappe-ai-stream-cursor">|</span>');
+		}
+		enhanceCodeBlocks(content);
+
+		return wrapper;
+	}
+
+	function renderMarkdown(content) {
+		if (markedLoaded && window.marked?.parse) {
+			return window.marked.parse(escapeMarkdownHtml(content || ""), {
+				breaks: true,
+				gfm: true,
+			});
+		}
+
+		return `<p>${escapeHtml(content || "").replace(/\n/g, "<br>")}</p>`;
+	}
+
+	function enhanceCodeBlocks(scope) {
+		scope.querySelectorAll("pre").forEach((pre) => {
+			const wrapper = document.createElement("div");
+			wrapper.className = "frappe-ai-code-wrap";
+			pre.parentNode.insertBefore(wrapper, pre);
+			wrapper.appendChild(pre);
+
+			const copyButton = document.createElement("button");
+			copyButton.className = "frappe-ai-copy-code";
+			copyButton.type = "button";
+			copyButton.setAttribute("data-copy-code", "true");
+			copyButton.textContent = "Copy";
+			wrapper.appendChild(copyButton);
+		});
+	}
+
+	function getRelativeTimestamp(message) {
+		if (!message.createdAt) {
+			return message.timestamp || "just now";
+		}
+
+		const elapsedSeconds = Math.max(0, Math.floor((Date.now() - message.createdAt) / 1000));
+		if (elapsedSeconds < 60) {
+			return "just now";
+		}
+
+		const elapsedMinutes = Math.floor(elapsedSeconds / 60);
+		if (elapsedMinutes < 60) {
+			return `${elapsedMinutes}m ago`;
+		}
+
+		const elapsedHours = Math.floor(elapsedMinutes / 60);
+		if (elapsedHours < 24) {
+			return `${elapsedHours}h ago`;
+		}
+
+		return `${Math.floor(elapsedHours / 24)}d ago`;
+	}
+
+	function copyCodeBlock(button) {
+		const code = button.closest(".frappe-ai-code-wrap")?.querySelector("code");
+		copyText(code?.textContent || "", button);
+	}
+
+	function copyAssistantMessage(button) {
+		const messageId = button.getAttribute("data-copy-message");
+		const conversation = getActiveConversation();
+		const message = conversation?.messages.find((item) => item.id === messageId);
+		copyText(message?.content || "", button);
+	}
+
+	function copyText(text, button) {
+		if (!text) {
+			return;
+		}
+
+		const originalLabel = button.textContent;
+		const originalHtml = button.innerHTML;
+		const done = () => {
+			button.textContent = "Copied!";
+			window.setTimeout(() => {
+				if (button.classList.contains("frappe-ai-bubble-action")) {
+					button.innerHTML = originalHtml;
+				} else {
+					button.textContent = originalLabel || "Copy";
+				}
+			}, COPY_RESET_MS);
+		};
+
+		if (navigator.clipboard?.writeText) {
+			navigator.clipboard.writeText(text).then(done);
+			return;
+		}
+
+		const textarea = document.createElement("textarea");
+		textarea.value = text;
+		textarea.setAttribute("readonly", "readonly");
+		textarea.style.position = "fixed";
+		textarea.style.opacity = "0";
+		document.body.appendChild(textarea);
+		textarea.select();
+		document.execCommand("copy");
+		textarea.remove();
+		done();
+	}
+
+	function escapeHtml(value) {
+		return String(value)
+			.replace(/&/g, "&amp;")
+			.replace(/</g, "&lt;")
+			.replace(/>/g, "&gt;")
+			.replace(/"/g, "&quot;")
+			.replace(/'/g, "&#039;");
+	}
+
+	function escapeAttribute(value) {
+		return escapeHtml(value).replace(/`/g, "&#096;");
+	}
+
+	function escapeMarkdownHtml(value) {
+		return String(value).replace(/</g, "&lt;").replace(/>/g, "&gt;");
+	}
+
+	// ─── CHANGE 4: Conversation Snippet Helper ───
+	function truncateText(value, length) {
+		const text = String(value || "");
+		if (text.length <= length) {
+			return text;
+		}
+
+		return `${text.slice(0, length - 1)}…`;
+	}
+	// ─── END CHANGE 4 ───
+
+	// ─── TODO: API LAYER ─────────────────────────────────────────────────────────
+	function loadConversations() {
+		// TODO: API - Replace with a real conversation list/history endpoint.
+		return SAMPLE_CONVERSATIONS.map((conversation, conversationIndex) => {
+			const createdAt = Date.now() - (conversationIndex === 0 ? 2 * 60 * 1000 : 60 * 60 * 1000);
+			return {
+				...conversation,
+				messages: conversation.messages.map((message, messageIndex) => ({
+					...message,
+					id: `sample_${conversation.id}_${messageIndex}`,
+					createdAt,
+				})),
+			};
+		});
+	}
+
+	function createConversation(options) {
+		// TODO: API - Replace with a real conversation creation endpoint.
+		const title = options.initialMessage.content.slice(0, 42) || "New Chat";
+
+		return {
+			id: `conv_${Date.now()}`,
+			title,
+			last_message: options.initialMessage.content,
+			timestamp: "just now",
+			streamingMessageId: null,
+			messages: [options.initialMessage],
+		};
+	}
+
+	function getAssistantResponse(options) {
+		// TODO: API - Replace with a real assistant response endpoint.
+		const responseIndex = Math.abs(hashString(options.prompt)) % SAMPLE_RESPONSES.length;
+		return SAMPLE_RESPONSES[responseIndex]
+			.replace("{n}", String(7 + responseIndex * 3))
+			.replace("{amount}", "₹8,42,300")
+			.replace("{count}", String(12 + responseIndex));
+	}
+
+	function hashString(value) {
+		return Array.from(value).reduce((hash, character) => {
+			return (hash << 5) - hash + character.charCodeAt(0);
+		}, 0);
+	}
+
+	// ─── INIT ───────────────────────────────────────────────────────────────────
+	function init() {
+		if (window.FrappeAI?._initialized) {
+			return;
+		}
+
+		injectStyles();
+		buildDom();
+		bindEvents();
+
+		const conversations = loadConversations();
+		setState(
+			{
+				type: "LOAD_CONVERSATIONS",
+				conversations,
+				activeConversationId: conversations[0]?.id || null,
+			},
+			{ skipRender: true }
+		);
+		window.FrappeAI._initialized = true;
+		render();
+		_log("Frappe AI chat initialized");
+	}
+
+	function open() {
+		if (!window.FrappeAI?._initialized) {
+			init();
+		}
+
+		setState({ type: "OPEN" });
+		ensureMarked().then(() => {
+			if (!markedLoaded && window.marked?.parse) {
+				markedLoaded = true;
+			}
+			render();
+		});
+		window.setTimeout(() => {
+			dom.textarea?.focus();
+		}, 0);
+	}
+
+	function close() {
+		setState({ type: "CLOSE" });
+		dom.fab?.focus();
+	}
+
+	function ensureMarked() {
+		if (markedLoaded || window.marked?.parse) {
+			markedLoaded = true;
+			return Promise.resolve();
+		}
+
+		if (!markedPromise) {
+			markedPromise = frappe.require(MARKED_URL).then(() => {
+				markedLoaded = Boolean(window.marked?.parse);
+			});
+		}
+
+		return markedPromise;
+	}
+
+	window.FrappeAI = {
+		init,
+		open,
+		close,
+		_initialized: Boolean(window.FrappeAI?._initialized),
+	};
+
+	frappe.after_ajax(function () {
+		// only init on desk pages, not login/setup
+		if (frappe.session && frappe.session.user !== "Guest") {
+			window.FrappeAI.init();
+		}
+	});
+})();
