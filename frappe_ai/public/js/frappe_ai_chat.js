@@ -5,58 +5,9 @@
 		return;
 	}
 
-	// ─── SAMPLE_DATA (replace with API in v2) ────────────────────────────────────
-	const SAMPLE_CONVERSATIONS = [
-		{
-			id: "conv_001",
-			title: "Open Purchase Orders",
-			last_message: "You have 14 open POs totalling ₹8.4L",
-			timestamp: "2m ago",
-			messages: [
-				{
-					role: "user",
-					content: "Show me all open purchase orders",
-					timestamp: "10:32 AM",
-				},
-				{
-					role: "assistant",
-					content:
-						"You have **14 open Purchase Orders** totalling **₹8,42,300**.\n\nTop 3 by value:\n\n| Supplier | Amount | Due Date |\n|---|---|---|\n| Tata Steel Ltd | ₹2,10,000 | 12 Jun 2025 |\n| Infosys BPO | ₹1,85,500 | 18 Jun 2025 |\n| Reliance Ind | ₹1,20,000 | 22 Jun 2025 |\n\nWould you like me to filter by due date or supplier?",
-					timestamp: "10:32 AM",
-				},
-			],
-		},
-		{
-			id: "conv_002",
-			title: "Pending Approvals",
-			last_message: "3 leave applications awaiting your approval",
-			timestamp: "1h ago",
-			messages: [
-				{
-					role: "user",
-					content: "Any pending approvals for me?",
-					timestamp: "9:15 AM",
-				},
-				{
-					role: "assistant",
-					content:
-						"You have **3 pending approvals**:\n\n1. **Leave Application** — Ravi Kumar (Sick Leave, 2 days)\n2. **Expense Claim** — Priya Shah (₹4,200 travel)\n3. **Purchase Order** — ₹85,000 from Wipro Ltd\n\nShall I open any of these?",
-					timestamp: "9:15 AM",
-				},
-			],
-		},
-	];
-
-	const SAMPLE_RESPONSES = [
-		"I found **{n} records** matching your query. Here's a summary...",
-		"Based on your data, here are the key insights:\n\n- Total value: **₹{amount}**\n- Records this month: **{count}**\n- Trend: ↑ 12% vs last month",
-		"I don't have permission to access that DocType. Please check your role assignments.",
-		'Here\'s the breakdown:\n\n```json\n{\n  "total": 42,\n  "pending": 7,\n  "overdue": 3\n}\n```',
-	];
 
 	// ─── STATE ───────────────────────────────────────────────────────────────────
 	const MARKED_URL = "https://cdn.jsdelivr.net/npm/marked/marked.min.js";
-	const STREAM_DELAY_MS = 18;
 	const TYPING_DELAY_MS = 200;
 	const COPY_RESET_MS = 1500;
 	const SUGGESTIONS = [
@@ -235,6 +186,20 @@ let panelAnimation = null;
 			}
 			// TODO: API — replace with server-side search in v2
 			// ─── END CHANGE 4 ───
+			case "LOAD_MESSAGES": {
+				return {
+					...currentState,
+					conversations: currentState.conversations.map((c) => {
+						if (c.id !== action.conversationId) return c;
+						return {
+							...c,
+							messages: action.messages,
+							title: action.title || c.title,
+							last_message: action.last_message || c.last_message,
+						};
+					}),
+				};
+			}
 			case "ADD_CONVERSATION": {
 				return {
 					...currentState,
@@ -242,6 +207,22 @@ let panelAnimation = null;
 					activeConversationId: action.conversation.id,
 				};
 			}
+			// ─── CHANGE B: Resolve pending conversation id once API responds ───
+			case "RESOLVE_CONVERSATION_ID": {
+				const updatedConversations = currentState.conversations.map((conversation) => {
+					if (conversation.id !== action.localId) return conversation;
+					return { ...conversation, id: action.realId, title: action.title, _pending: false };
+				});
+				return {
+					...currentState,
+					conversations: updatedConversations,
+					activeConversationId:
+						currentState.activeConversationId === action.localId
+							? action.realId
+							: currentState.activeConversationId,
+				};
+			}
+			// ─── END CHANGE B ───
 			case "ADD_MESSAGE": {
 				return {
 					...currentState,
@@ -1997,10 +1978,16 @@ let panelAnimation = null;
 			return;
 		}
 
-		setState({
-			type: "SELECT_CONVERSATION",
-			conversationId: row.getAttribute("data-conversation-id"),
-		});
+		const conversationId = row.getAttribute("data-conversation-id");
+		const alreadyLoaded = state.conversations.find(
+			(c) => c.id === conversationId && c.messages.length > 0
+		);
+
+		setState({ type: "SELECT_CONVERSATION", conversationId });
+
+		if (!alreadyLoaded) {
+			loadMessages(conversationId);
+		}
 	}
 	// TODO: API — replace with server-side search in v2
 	// ─── END CHANGE 4 ───
@@ -2096,20 +2083,39 @@ let panelAnimation = null;
 			return;
 		}
 
-		let conversationId = getActiveConversationId();
 		const userMessage = createMessage("user", prompt);
-
-		if (!conversationId) {
-			const conversation = createConversation({ initialMessage: userMessage });
-			conversationId = conversation.id;
-			setState({ type: "ADD_CONVERSATION", conversation }, { skipRender: true });
-		} else {
-			setState({ type: "ADD_MESSAGE", conversationId, message: userMessage }, { skipRender: true });
-		}
-
 		resetComposer();
-		setState({ type: "SHOW_TYPING" });
-		startAssistantTurn(conversationId, prompt);
+
+		const existingId = getActiveConversationId();
+
+		if (existingId) {
+			setState({ type: "ADD_MESSAGE", conversationId: existingId, message: userMessage }, { skipRender: true });
+			setState({ type: "SHOW_TYPING" });
+			startAssistantTurn(existingId, prompt);
+		} else {
+			// Create conversation on server first, then stream once we have a real ID
+			setState({ type: "SHOW_TYPING" });
+			frappe.call({
+				method: "frappe_ai.frappe_ai.api.conversation.create",
+				callback(response) {
+					if (!response.message) {
+						setState({ type: "STOP_STREAM", conversationId: null });
+						return;
+					}
+					const { conversation_id, title } = response.message;
+					const conversation = {
+						id: conversation_id,
+						title,
+						last_message: userMessage.content,
+						timestamp: "just now",
+						streamingMessageId: null,
+						messages: [userMessage],
+					};
+					setState({ type: "ADD_CONVERSATION", conversation }, { skipRender: true });
+					startAssistantTurn(conversation_id, prompt);
+				},
+			});
+		}
 	}
 
 	function trapFocus(event) {
@@ -2298,66 +2304,121 @@ let panelAnimation = null;
 	// ─── END CHANGE 3 ───
 
 	// ─── STREAM ENGINE ───────────────────────────────────────────────────────────
-	function startAssistantTurn(conversationId, prompt) {
-		const response = getAssistantResponse({ prompt, conversation: getActiveConversation() });
 
+	// ─── CHANGE C: Replace simulation with real EventSource SSE streaming ───
+	let _activeEventSource = null;
+
+	function startAssistantTurn(conversationId, prompt) {
 		typingTimeout = window.setTimeout(() => {
 			typingTimeout = null;
-			const assistantMessage = createMessage("assistant", "", {
-				isStreaming: true,
-			});
 
-			const interval = streamText({
-				conversationId,
-				text: response,
-			});
-
+			const assistantMessage = createMessage("assistant", "", { isStreaming: true });
 			setState({
 				type: "START_STREAM",
 				conversationId,
 				message: assistantMessage,
-				streamInterval: interval,
+				streamInterval: null,
 			});
+
+			const params = new URLSearchParams({
+				conversation_id: conversationId,
+				message: prompt,
+				sid: frappe.boot?.sid || "",
+			});
+
+			const es = new EventSource(`/api/method/frappe_ai.frappe_ai.api.chat.stream_message?${params}`);
+			_activeEventSource = es;
+
+			es.addEventListener("token", (event) => {
+				const data = JSON.parse(event.data || "{}");
+				setState({
+					type: "APPEND_STREAM_CHUNK",
+					conversationId,
+					chunk: data.delta || "",
+				});
+			});
+
+			es.addEventListener("tool_start", () => {});
+
+			es.addEventListener("tool_result", () => {});
+
+			es.addEventListener("done", (event) => {
+				const data = JSON.parse(event.data || "{}");
+				const usage = data.usage || {};
+				const tokens = (usage.input || 0) + (usage.output || 0);
+				if (dom.tokenCounter) {
+					dom.tokenCounter.textContent = `~${tokens} tokens`;
+				}
+				es.close();
+				_activeEventSource = null;
+				setState({ type: "FINISH_STREAM", conversationId });
+				// Refresh conversation list so sidebar shows updated title + snippet
+				loadConversations();
+			});
+
+			es.addEventListener("title_update", (event) => {
+				const data = JSON.parse(event.data || "{}");
+				if (!data.title) return;
+				// Update the title in state directly without a full reload
+				setState({
+					type: "LOAD_MESSAGES",
+					conversationId,
+					messages: (() => {
+						const found = state.conversations.find((c) => c.id === conversationId);
+						return found ? found.messages : [];
+					})(),
+					title: data.title,
+					last_message: (() => {
+						const found = state.conversations.find((c) => c.id === conversationId);
+						return found ? found.last_message : "";
+					})(),
+				});
+			});
+
+			es.addEventListener("error", (event) => {
+				if (event.data) {
+					const data = JSON.parse(event.data || "{}");
+					if (frappe?.show_alert) {
+						frappe.show_alert({ message: data.message || "An error occurred.", indicator: "red" }, 5);
+					}
+				}
+				es.close();
+				_activeEventSource = null;
+				setState({ type: "FINISH_STREAM", conversationId });
+			});
+
+			es.onerror = () => {
+				es.close();
+				_activeEventSource = null;
+				setState({ type: "FINISH_STREAM", conversationId });
+			};
 		}, TYPING_DELAY_MS);
 	}
+	// ─── END CHANGE C ───
 
-	function streamText(options) {
-		const characters = Array.from(options.text);
-		let index = 0;
-
-		const interval = window.setInterval(() => {
-			if (index >= characters.length) {
-				window.clearInterval(interval);
-				setState({ type: "FINISH_STREAM", conversationId: options.conversationId });
-				return;
-			}
-
-			setState({
-				type: "APPEND_STREAM_CHUNK",
-				conversationId: options.conversationId,
-				chunk: characters[index],
-			});
-			index += 1;
-		}, STREAM_DELAY_MS);
-
-		return interval;
-	}
-
+	// ─── CHANGE D: Wire abort button to abort_stream API ───
 	function stopStreaming() {
 		if (typingTimeout) {
 			window.clearTimeout(typingTimeout);
 			typingTimeout = null;
 		}
 
-		if (state.streamInterval) {
-			window.clearInterval(state.streamInterval);
+		if (_activeEventSource) {
+			_activeEventSource.close();
+			_activeEventSource = null;
 		}
 
-		setState({
-			type: "STOP_STREAM",
-			conversationId: getActiveConversationId(),
-		});
+		const conversationId = getActiveConversationId();
+		if (conversationId) {
+			frappe.call({
+				method: "frappe_ai.frappe_ai.api.chat.abort_stream",
+				args: { conversation_id: conversationId },
+			});
+		}
+
+		setState({ type: "STOP_STREAM", conversationId });
 	}
+	// ─── END CHANGE D ───
 
 	// ─── RENDER ──────────────────────────────────────────────────────────────────
 	function render() {
@@ -2702,49 +2763,98 @@ let panelAnimation = null;
 	}
 	// ─── END CHANGE 4 ───
 
-	// ─── TODO: API LAYER ─────────────────────────────────────────────────────────
+	// ─── API LAYER ───────────────────────────────────────────────────────────────
+
+	// ─── CHANGE A: Wire getConversations ───
 	function loadConversations() {
-		// TODO: API - Replace with a real conversation list/history endpoint.
-		return SAMPLE_CONVERSATIONS.map((conversation, conversationIndex) => {
-			const createdAt = Date.now() - (conversationIndex === 0 ? 2 * 60 * 1000 : 60 * 60 * 1000);
-			return {
-				...conversation,
-				messages: conversation.messages.map((message, messageIndex) => ({
-					...message,
-					id: `sample_${conversation.id}_${messageIndex}`,
-					createdAt,
-				})),
-			};
+		frappe.call({
+			method: "frappe_ai.frappe_ai.api.conversation.list",
+			args: { page: 0, limit: 50 },
+			callback(response) {
+				if (!response.message) return;
+				const { conversations } = response.message;
+				const mapped = (conversations || []).map((conversation) => ({
+					id: conversation.name,
+					title: conversation.title || "New Conversation",
+					last_message: conversation.last_message || "",
+					timestamp: conversation.modified ? _relativeDate(conversation.modified) : "",
+					is_pinned: conversation.is_pinned,
+					messages: [],
+				}));
+				// Preserve current activeConversationId — don't clobber an ongoing chat
+				const currentId = state.activeConversationId;
+				const stillExists = mapped.some((c) => c.id === currentId);
+				setState({
+					type: "LOAD_CONVERSATIONS",
+					conversations: mapped,
+					activeConversationId: stillExists ? currentId : null,
+				});
+			},
 		});
 	}
 
-	function createConversation(options) {
-		// TODO: API - Replace with a real conversation creation endpoint.
-		const title = options.initialMessage.content.slice(0, 42) || "New Chat";
+	function loadMessages(conversationId) {
+		if (!conversationId) return;
+		frappe.call({
+			method: "frappe_ai.frappe_ai.api.conversation.get",
+			args: { conversation_id: conversationId },
+			callback(response) {
+				if (!response.message?.conversation) return;
+				const raw = response.message.conversation;
+				const messages = (raw.messages || []).map((m) => ({
+					id: m.name || `msg_${Math.random().toString(36).slice(2)}`,
+					role: m.role,
+					content: m.content || "",
+					timestamp: m.timestamp ? _relativeDate(m.timestamp) : "just now",
+					createdAt: m.timestamp ? new Date(m.timestamp).getTime() : Date.now(),
+					isStreaming: false,
+				}));
+				setState({
+					type: "LOAD_MESSAGES",
+					conversationId,
+					messages,
+					title: raw.title || "New Conversation",
+					last_message: messages.length ? messages[messages.length - 1].content : "",
+				});
+			},
+		});
+	}
+	// ─── END CHANGE A ───
 
-		return {
-			id: `conv_${Date.now()}`,
-			title,
-			last_message: options.initialMessage.content,
-			timestamp: "just now",
-			streamingMessageId: null,
-			messages: [options.initialMessage],
-		};
+
+// ─── CHANGE E: Wire settings.get_public on init ───
+	function loadSiteSettings() {
+		frappe.call({
+			method: "frappe_ai.frappe_ai.api.settings.get_public",
+			callback(response) {
+				if (!response.message) return;
+				state.siteSettings = response.message;
+				_applySiteSettings(response.message);
+			},
+		});
 	}
 
-	function getAssistantResponse(options) {
-		// TODO: API - Replace with a real assistant response endpoint.
-		const responseIndex = Math.abs(hashString(options.prompt)) % SAMPLE_RESPONSES.length;
-		return SAMPLE_RESPONSES[responseIndex]
-			.replace("{n}", String(7 + responseIndex * 3))
-			.replace("{amount}", "₹8,42,300")
-			.replace("{count}", String(12 + responseIndex));
+	function _applySiteSettings(settings) {
+		if (dom.attachButton) {
+			dom.attachButton.style.display = settings.file_upload_enabled ? "" : "none";
+		}
+		const agentIndicator = dom.root.querySelector(".frappe-ai-agent-indicator");
+		if (agentIndicator) {
+			agentIndicator.style.display = settings.tool_calling_enabled ? "" : "none";
+		}
 	}
+	// ─── END CHANGE E ───
 
-	function hashString(value) {
-		return Array.from(value).reduce((hash, character) => {
-			return (hash << 5) - hash + character.charCodeAt(0);
-		}, 0);
+	function _relativeDate(dateStr) {
+		if (!dateStr) return "";
+		const date = new Date(dateStr);
+		const diffMs = Date.now() - date.getTime();
+		const diffMins = Math.floor(diffMs / 60000);
+		if (diffMins < 1) return "just now";
+		if (diffMins < 60) return `${diffMins}m ago`;
+		const diffHours = Math.floor(diffMins / 60);
+		if (diffHours < 24) return `${diffHours}h ago`;
+		return `${Math.floor(diffHours / 24)}d ago`;
 	}
 
 	// ─── INIT ───────────────────────────────────────────────────────────────────
@@ -2757,17 +2867,12 @@ let panelAnimation = null;
 		buildDom();
 		bindEvents();
 
-		const conversations = loadConversations();
-		setState(
-			{
-				type: "LOAD_CONVERSATIONS",
-				conversations,
-				activeConversationId: conversations[0]?.id || null,
-			},
-			{ skipRender: true }
-		);
 		window.FrappeAI._initialized = true;
 		render();
+		// ─── CHANGE A + CHANGE E: Load conversations and site settings from API ───
+		loadConversations();
+		loadSiteSettings();
+		// ─── END CHANGE A + CHANGE E ───
 		_log("Frappe AI chat initialized");
 	}
 

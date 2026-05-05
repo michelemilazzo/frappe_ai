@@ -1,0 +1,91 @@
+{
+ "actions": [],
+ "creation": "2025-01-01 00:00:00",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "role",
+  "content",
+  "column_break_1",
+  "input_tokens",
+  "output_tokens",
+  "finish_reason",
+  "timestamp",
+  "section_break_1",
+  "tool_calls_json",
+  "tool_results_json",
+  "attachment"
+ ],
+ "fields": [
+  {
+   "fieldname": "role",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Role",
+   "options": "user\nassistant\nsystem\ntool",
+   "reqd": 1
+  },
+  {
+   "fieldname": "content",
+   "fieldtype": "Long Text",
+   "label": "Content"
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "input_tokens",
+   "fieldtype": "Int",
+   "label": "Input Tokens"
+  },
+  {
+   "fieldname": "output_tokens",
+   "fieldtype": "Int",
+   "label": "Output Tokens"
+  },
+  {
+   "fieldname": "finish_reason",
+   "fieldtype": "Data",
+   "label": "Finish Reason"
+  },
+  {
+   "fieldname": "timestamp",
+   "fieldtype": "Datetime",
+   "label": "Timestamp"
+  },
+  {
+   "fieldname": "section_break_1",
+   "fieldtype": "Section Break",
+   "label": "Tool Data"
+  },
+  {
+   "fieldname": "tool_calls_json",
+   "fieldtype": "Long Text",
+   "label": "Tool Calls JSON"
+  },
+  {
+   "fieldname": "tool_results_json",
+   "fieldtype": "Long Text",
+   "label": "Tool Results JSON"
+  },
+  {
+   "fieldname": "attachment",
+   "fieldtype": "Attach",
+   "label": "Attachment"
+  }
+ ],
+ "istable": 1,
+ "links": [],
+ "modified": "2026-05-05 22:50:38.129383",
+ "modified_by": "Administrator",
+ "module": "Frappe AI",
+ "name": "AI Message",
+ "owner": "Administrator",
+ "permissions": [],
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

@@ -1,0 +1,99 @@
+{
+ "actions": [],
+ "autoname": "AI-TOOL-.YYYY.-.#####",
+ "creation": "2025-01-01 00:00:00",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "conversation",
+  "user",
+  "tool_name",
+  "doctype_accessed",
+  "column_break_1",
+  "was_permitted",
+  "records_returned",
+  "execution_ms",
+  "timestamp",
+  "section_break_1",
+  "filters_used"
+ ],
+ "fields": [
+  {
+   "fieldname": "conversation",
+   "fieldtype": "Link",
+   "label": "Conversation",
+   "options": "AI Conversation"
+  },
+  {
+   "fieldname": "user",
+   "fieldtype": "Link",
+   "label": "User",
+   "options": "User"
+  },
+  {
+   "fieldname": "tool_name",
+   "fieldtype": "Data",
+   "label": "Tool Name"
+  },
+  {
+   "fieldname": "doctype_accessed",
+   "fieldtype": "Data",
+   "label": "DocType Accessed"
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "was_permitted",
+   "fieldtype": "Check",
+   "label": "Was Permitted"
+  },
+  {
+   "fieldname": "records_returned",
+   "fieldtype": "Int",
+   "label": "Records Returned"
+  },
+  {
+   "fieldname": "execution_ms",
+   "fieldtype": "Int",
+   "label": "Execution (ms)"
+  },
+  {
+   "fieldname": "timestamp",
+   "fieldtype": "Datetime",
+   "label": "Timestamp"
+  },
+  {
+   "fieldname": "section_break_1",
+   "fieldtype": "Section Break",
+   "label": "Filters"
+  },
+  {
+   "fieldname": "filters_used",
+   "fieldtype": "Long Text",
+   "label": "Filters Used (JSON)"
+  }
+ ],
+ "links": [],
+ "modified": "2026-05-05 22:50:30.267503",
+ "modified_by": "Administrator",
+ "module": "Frappe AI",
+ "name": "AI Tool Call Log",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

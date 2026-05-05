@@ -1,0 +1,62 @@
+{
+ "actions": [],
+ "autoname": "AI-RL-.YYYY.-.#####",
+ "creation": "2025-01-01 00:00:00",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "user",
+  "window_start",
+  "request_count",
+  "token_count"
+ ],
+ "fields": [
+  {
+   "fieldname": "user",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "User",
+   "options": "User",
+   "reqd": 1
+  },
+  {
+   "fieldname": "window_start",
+   "fieldtype": "Datetime",
+   "in_list_view": 1,
+   "label": "Window Start",
+   "reqd": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "request_count",
+   "fieldtype": "Int",
+   "label": "Request Count"
+  },
+  {
+   "default": "0",
+   "fieldname": "token_count",
+   "fieldtype": "Int",
+   "label": "Token Count"
+  }
+ ],
+ "links": [],
+ "modified": "2026-05-05 22:50:54.889018",
+ "modified_by": "Administrator",
+ "module": "Frappe AI",
+ "name": "AI Rate Limit",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

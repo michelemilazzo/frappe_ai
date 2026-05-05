@@ -9,6 +9,9 @@ readme = "README.md"
 dynamic = ["version"]
 dependencies = [
     # "frappe~=16.0.0" # Installed and managed by bench.
+    "google-genai>=1.0.0,<2.0.0",
+    "tiktoken>=0.7.0,<1.0.0",
+    "httpx>=0.27.0,<1.0.0",
 ]
 
 [build-system]
