@@ -12,6 +12,33 @@ from frappe_ai.frappe_ai.ai_engine.base_provider import (
 	ProviderRateLimitError,
 )
 
+# Regex that matches a raw tool-call JSON blob that some models (NVIDIA Llama)
+# emit as plain text content instead of via the tool_calls field.
+_TOOL_CALL_JSON_RE = re.compile(
+	r'^\s*\{[^{}]*"(?:type|name)"\s*:\s*"(?:function|[a-z_]+)"[^{}]*\}\s*$',
+	re.DOTALL,
+)
+
+
+def _strip_tool_call_json(text: str) -> str:
+	"""Return empty string if the entire text is a raw tool-call JSON blob."""
+	if not text or "{" not in text:
+		return text
+	if _TOOL_CALL_JSON_RE.match(text):
+		return ""
+	# Also catch array of tool calls: [{...}]
+	stripped = text.strip()
+	if stripped.startswith("[") and stripped.endswith("]"):
+		try:
+			parsed = json.loads(stripped)
+			if isinstance(parsed, list) and all(
+				isinstance(i, dict) and ("name" in i or "type" in i) for i in parsed
+			):
+				return ""
+		except (json.JSONDecodeError, ValueError):
+			pass
+	return text
+
 
 class _FrappeEncoder(json.JSONEncoder):
 	def default(self, o):
@@ -225,6 +252,7 @@ def _generate_stream(
 	# DB saves after streaming completes
 	if not aborted:
 		try:
+			full_text = _strip_tool_call_json(full_text)
 			conv_doc = frappe.get_doc("AI Conversation", conversation_id)
 			conv_doc.append(
 				"messages",

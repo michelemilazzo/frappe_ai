@@ -184,6 +184,28 @@ let panelAnimation = null;
 					searchQuery: "",
 				};
 			}
+			case "UPDATE_CONVERSATION_TITLE": {
+				return {
+					...currentState,
+					conversations: currentState.conversations.map((c) =>
+						c.id === action.conversationId ? { ...c, title: action.title } : c
+					),
+				};
+			}
+			case "DELETE_CONVERSATION": {
+				const remaining = currentState.conversations.filter(
+					(c) => c.id !== action.conversationId
+				);
+				const nextActive =
+					currentState.activeConversationId === action.conversationId
+						? (remaining[0]?.id || null)
+						: currentState.activeConversationId;
+				return {
+					...currentState,
+					conversations: remaining,
+					activeConversationId: nextActive,
+				};
+			}
 			// TODO: API — replace with server-side search in v2
 			// ─── END CHANGE 4 ───
 			case "LOAD_MESSAGES": {
@@ -416,6 +438,7 @@ let panelAnimation = null;
 								<!-- ─── END CHANGE 5 ─── -->
 								<span class="frappe-ai-app-icon" aria-hidden="true">${getIcon("brain")}</span>
 								<span>Frappe AI</span>
+								<span class="frappe-ai-provider-badge"></span>
 							</div>
 							<!-- ─── CHANGE 4: Inline Chat Search Bar ─── -->
 							<!-- ─── CHANGE 8: Search bar moved to history drawer; header slot kept as empty placeholder ─── -->
@@ -457,14 +480,12 @@ let panelAnimation = null;
 									${getIcon("close")}
 								</button>
 							</div>
-							<input class="frappe-ai-drawer-search-input" type="text" placeholder="Search conversations..." aria-label="Search conversations" />
+							<button class="frappe-ai-history-primary-new" type="button" data-action="history-new-chat">
+								${getIcon("plus")}
+								<span>New Conversation</span>
+							</button>
+							<input class="frappe-ai-drawer-search-input" id="frappe-ai-drawer-search" type="text" name="frappe-ai-drawer-search" placeholder="Search conversations..." aria-label="Search conversations" />
 							<div class="frappe-ai-history-list"></div>
-							<div class="frappe-ai-history-footer">
-								<button class="frappe-ai-history-primary-new" type="button" data-action="history-new-chat">
-									${getIcon("plus")}
-									<span>New Conversation</span>
-								</button>
-							</div>
 						</aside>
 						<!-- ─── END CHANGE 4 ─── -->
 					</div>
@@ -655,6 +676,17 @@ let panelAnimation = null;
 				<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
 					<rect x="7" y="7" width="10" height="10" rx="1.5"/>
 				</svg>`,
+			edit: `
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+					<path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4Z"/>
+				</svg>`,
+			trash: `
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M3 6h18"/>
+					<path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+					<path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+				</svg>`,
 		};
 
 		return icons[name] || "";
@@ -798,6 +830,12 @@ let panelAnimation = null;
 				transform: translateY(0);
 			}
 
+			.frappe-ai-fab.is-dragging {
+				box-shadow: var(--shadow-base), 0 16px 48px var(--frappe-ai-shadow-color);
+				cursor: grabbing;
+				transition: box-shadow 120ms ease;
+			}
+
 			/* // ─── CHANGE 3: Full-Screen Expand Mode (desktop only — mobile uses popover) ─── */
 			.frappe-ai-panel-inner {
 				display: flex;
@@ -854,7 +892,7 @@ let panelAnimation = null;
 				.frappe-ai-panel.is-expanded .frappe-ai-panel-inner {
 					background: var(--frappe-ai-canvas);
 					display: grid;
-					grid-template-columns: 232px minmax(0, 1fr);
+					grid-template-columns: 268px minmax(0, 1fr);
 					grid-template-rows: 52px minmax(0, 1fr) auto;
 					margin: 0;
 					max-width: none;
@@ -886,7 +924,7 @@ let panelAnimation = null;
 					grid-column: 1;
 					grid-row: 1 / 4;
 					left: auto;
-					padding: 12px 10px;
+					padding: 8px 8px;
 					position: relative;
 					top: auto;
 					transform: none;
@@ -894,8 +932,8 @@ let panelAnimation = null;
 				}
 
 				.frappe-ai-panel.is-expanded .frappe-ai-history-header {
-					height: 36px;
-					margin-bottom: 8px;
+					height: 32px;
+					margin-bottom: 6px;
 				}
 
 				.frappe-ai-panel.is-expanded .frappe-ai-history-header .frappe-ai-icon-button {
@@ -913,7 +951,7 @@ let panelAnimation = null;
 				.frappe-ai-panel.is-expanded .frappe-ai-conversation-row {
 					border: 0;
 					border-radius: 6px;
-					padding: 7px 8px;
+					padding: 4px 6px;
 				}
 
 				.frappe-ai-panel.is-expanded .frappe-ai-conversation-snippet,
@@ -948,28 +986,40 @@ let panelAnimation = null;
 
 				.frappe-ai-panel.is-expanded .frappe-ai-input-area {
 					align-self: end;
-					background: transparent;
+					background: var(--frappe-ai-canvas);
 					border-top: 0;
-					box-shadow: 0 -18px 34px color-mix(in srgb, var(--frappe-ai-canvas) 88%, transparent);
 					grid-column: 2;
 					grid-row: 3;
-					justify-self: center;
-					padding: 14px 24px 18px;
-					width: min(760px, calc(100% - 64px));
+					padding: 12px 32px 20px;
 				}
 
 				.frappe-ai-panel.is-expanded .frappe-ai-input-row {
-					background: var(--frappe-ai-message-surface);
+					background: var(--bg-color);
 					border: 1px solid var(--border-color);
-					border-radius: 14px;
-					box-shadow: var(--shadow-base), 0 10px 30px var(--frappe-ai-soft-shadow-color);
-					padding: 8px;
+					border-radius: 12px;
+					box-shadow: 0 1px 4px color-mix(in srgb, var(--gray-800, #000) 8%, transparent);
+					margin: 0 auto;
+					max-width: 760px;
+					padding: 6px 8px;
+					transition: border-color 140ms ease, box-shadow 140ms ease;
+				}
+
+				.frappe-ai-panel.is-expanded .frappe-ai-input-row:focus-within {
+					border-color: color-mix(in srgb, var(--primary-color) 50%, var(--border-color));
+					box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary-color) 12%, transparent);
 				}
 
 				.frappe-ai-panel.is-expanded .frappe-ai-textarea {
 					background: transparent;
 					border: 0;
-					min-height: 42px;
+					min-height: 40px;
+				}
+
+				.frappe-ai-panel.is-expanded .frappe-ai-textarea-wrap {
+					background: transparent;
+					border: 0;
+					box-shadow: none;
+					padding: 0;
 				}
 
 				.frappe-ai-panel.is-expanded .frappe-ai-textarea-wrap:focus-within {
@@ -977,7 +1027,9 @@ let panelAnimation = null;
 				}
 
 				.frappe-ai-panel.is-expanded .frappe-ai-token-counter {
-					padding-right: 6px;
+					margin: 4px auto 0;
+					max-width: 760px;
+					padding-right: 2px;
 				}
 			}
 			/* // ─── END CHANGE 3 ─── */
@@ -996,15 +1048,18 @@ let panelAnimation = null;
 			@media (min-width: 769px) {
 				.fai-expanded .fai-btn-close,
 				.fai-expanded .fai-btn-collapse {
-					background: color-mix(in srgb, var(--primary-color) 12%, transparent);
-					border-radius: 6px;
-					box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary-color) 30%, transparent);
-					color: var(--primary-color);
+					background: var(--btn-default-bg, var(--control-bg));
+					border: 1px solid var(--border-color);
+					border-radius: var(--border-radius);
+					color: var(--text-color);
+					height: 28px;
+					width: 28px;
 				}
 
 				.fai-expanded .fai-btn-close:hover,
 				.fai-expanded .fai-btn-collapse:hover {
-					background: color-mix(in srgb, var(--primary-color) 22%, transparent);
+					background: var(--btn-default-hover-bg, var(--frappe-ai-hover));
+					border-color: var(--gray-400, var(--border-color));
 				}
 			}
 			/* // ─── END CHANGE 7 ─── */
@@ -1046,6 +1101,23 @@ let panelAnimation = null;
 				font-weight: 600;
 				gap: 8px;
 				min-width: 0;
+			}
+
+			.frappe-ai-provider-badge {
+				background: var(--control-bg, var(--frappe-ai-subtle));
+				border: 1px solid var(--border-color);
+				border-radius: 4px;
+				color: var(--text-muted);
+				font-size: 10px;
+				font-weight: 500;
+				letter-spacing: 0.02em;
+				line-height: 1;
+				padding: 2px 6px;
+				text-transform: capitalize;
+			}
+
+			.frappe-ai-provider-badge:empty {
+				display: none;
 			}
 
 			/* // ─── CHANGE 5: Connected Header Dot ─── */
@@ -1446,11 +1518,10 @@ let panelAnimation = null;
 				border: 1px solid var(--border-color);
 				border-radius: var(--border-radius);
 				color: var(--text-color);
-				cursor: pointer;
-				display: block;
+				display: flex;
+				align-items: stretch;
 				font-family: var(--font-stack);
-				padding: 10px;
-				text-align: left;
+				position: relative;
 				transition: background 140ms ease, border-color 140ms ease;
 				width: 100%;
 			}
@@ -1461,11 +1532,55 @@ let panelAnimation = null;
 				border-color: color-mix(in srgb, var(--primary-color) 24%, var(--border-color));
 			}
 
+			.frappe-ai-conversation-body {
+				background: transparent;
+				border: 0;
+				color: inherit;
+				cursor: pointer;
+				flex: 1 1 auto;
+				font-family: var(--font-stack);
+				min-width: 0;
+				padding: 5px;
+				text-align: left;
+			}
+
+			.frappe-ai-conversation-title-wrap {
+				margin-bottom: 4px;
+				position: relative;
+			}
+
 			.frappe-ai-conversation-title {
+				display: block;
 				font-size: var(--font-size-base);
 				font-weight: 600;
 				line-height: 1.3;
-				margin-bottom: 4px;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+			}
+
+			.frappe-ai-conversation-title-input {
+				background: var(--bg-color);
+				border: 1px solid var(--primary-color);
+				border-radius: 4px;
+				box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary-color) 20%, transparent);
+				box-sizing: border-box;
+				color: var(--text-color);
+				display: none;
+				font-family: var(--font-stack);
+				font-size: var(--font-size-base);
+				font-weight: 600;
+				outline: none;
+				padding: 1px 5px;
+				width: 100%;
+			}
+
+			.frappe-ai-conversation-row.is-editing .frappe-ai-conversation-title {
+				display: none;
+			}
+
+			.frappe-ai-conversation-row.is-editing .frappe-ai-conversation-title-input {
+				display: block;
 			}
 
 			.frappe-ai-conversation-snippet {
@@ -1473,12 +1588,69 @@ let panelAnimation = null;
 				font-size: var(--font-size-sm);
 				line-height: 1.35;
 				margin-bottom: 4px;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
 			}
 
 			.frappe-ai-conversation-time {
 				color: var(--text-muted);
 				font-size: var(--font-size-sm);
 				line-height: 1.2;
+			}
+
+			.frappe-ai-conversation-actions {
+				align-items: center;
+				display: flex;
+				flex: 0 0 auto;
+				gap: 2px;
+				opacity: 0;
+				padding: 6px 0 6px 0;
+				pointer-events: none;
+				transition: opacity 120ms ease;
+			}
+
+			@media (min-width: 769px) {
+				.fai-expanded .frappe-ai-conversation-actions {
+					padding: 0;
+				}
+			}
+
+			.frappe-ai-conversation-row:hover .frappe-ai-conversation-actions,
+			.frappe-ai-conversation-row.is-active .frappe-ai-conversation-actions,
+			.frappe-ai-conversation-row.is-editing .frappe-ai-conversation-actions {
+				opacity: 1;
+				pointer-events: auto;
+			}
+
+			.frappe-ai-conv-action-btn {
+				align-items: center;
+				background: transparent;
+				border: 0;
+				border-radius: 4px;
+				color: var(--text-muted);
+				cursor: pointer;
+				display: flex;
+				height: 24px;
+				justify-content: center;
+				padding: 0;
+				transition: background 120ms ease, color 120ms ease;
+				width: 24px;
+			}
+
+			.frappe-ai-conv-action-btn svg {
+				height: 13px;
+				width: 13px;
+			}
+
+			.frappe-ai-conv-action-btn:hover {
+				background: var(--frappe-ai-hover);
+				color: var(--text-color);
+			}
+
+			.frappe-ai-conv-action-btn.is-danger:hover {
+				background: color-mix(in srgb, var(--red-500, #e53935) 12%, transparent);
+				color: var(--red-500, #e53935);
 			}
 
 			.frappe-ai-history-drawer {
@@ -1511,34 +1683,41 @@ let panelAnimation = null;
 
 			/* // ─── CHANGE 4: New Conversation Button + Major Element Separation ─── */
 			.frappe-ai-history-primary-new {
-				align-items: center;
-				background: color-mix(in srgb, var(--primary-color) 10%, var(--frappe-ai-raised));
-				border: 1px solid color-mix(in srgb, var(--primary-color) 22%, var(--border-color));
-				border-radius: var(--border-radius);
-				color: var(--text-color);
-				cursor: pointer;
-				display: inline-flex;
-				flex: 0 0 auto;
-				font-family: var(--font-stack);
-				font-size: var(--font-size-base);
-				font-weight: 600;
-				gap: 8px;
-				justify-content: center;
-				margin-bottom: 12px;
-				padding: 9px 10px;
-				transition: background 150ms ease, border-color 150ms ease, transform 150ms ease;
-				width: 100%;
+				display: none;
 			}
 
-			.frappe-ai-history-primary-new:hover {
-				background: color-mix(in srgb, var(--primary-color) 16%, var(--frappe-ai-raised));
-				border-color: color-mix(in srgb, var(--primary-color) 34%, var(--border-color));
-				transform: translateY(-1px);
-			}
+			@media (min-width: 769px) {
+				.fai-expanded .frappe-ai-history-primary-new {
+					align-items: center;
+					background: var(--bg-color);
+					border: 1px solid var(--border-color);
+					border-radius: 6px;
+					box-sizing: border-box;
+					color: var(--text-color);
+					cursor: pointer;
+					display: inline-flex;
+					flex: 0 0 auto;
+					font-family: var(--font-stack);
+					font-size: var(--font-size-sm);
+					font-weight: 400;
+					gap: 6px;
+					justify-content: center;
+					margin: 0 0 6px 0;
+					padding: 7px 10px;
+					transition: background 140ms ease, border-color 140ms ease;
+					width: 100%;
+				}
 
-			.frappe-ai-history-primary-new svg {
-				height: 15px;
-				width: 15px;
+				.fai-expanded .frappe-ai-history-primary-new:hover {
+					background: var(--frappe-ai-hover);
+					border-color: var(--gray-400, var(--border-color));
+				}
+
+				.fai-expanded .frappe-ai-history-primary-new svg {
+					height: 14px;
+					width: 14px;
+					flex-shrink: 0;
+				}
 			}
 			/* // ─── END CHANGE 4 ─── */
 
@@ -1584,34 +1763,40 @@ let panelAnimation = null;
 
 			/* // ─── END CHANGE 4 ─── */
 
-			.frappe-ai-stream-cursor {
-				animation: frappe-ai-cursor-blink 1s steps(2, start) infinite;
-				color: var(--primary-color);
-				font-weight: 600;
-				margin-left: 1px;
+			.frappe-ai-stream-thinking {
+				margin-top: 8px;
 			}
 
 			.frappe-ai-typing {
-				align-items: center;
-				display: inline-flex;
-				gap: 4px;
-				height: 18px;
+				display: flex;
+				flex-direction: column;
+				gap: 7px;
+				padding: 2px 0;
+				width: 160px;
 			}
 
 			.frappe-ai-typing span {
-				animation: frappe-ai-dot-bounce 900ms infinite ease-in-out;
-				background: var(--text-muted);
-				border-radius: 50%;
-				height: 6px;
-				width: 6px;
+				animation: frappe-ai-shimmer 1.4s infinite ease-in-out;
+				background: linear-gradient(
+					90deg,
+					var(--border-color) 25%,
+					color-mix(in srgb, var(--primary-color) 30%, var(--border-color)) 50%,
+					var(--border-color) 75%
+				);
+				background-size: 200% 100%;
+				border-radius: 4px;
+				height: 8px;
+				width: 100%;
 			}
 
 			.frappe-ai-typing span:nth-child(2) {
-				animation-delay: 120ms;
+				animation-delay: 100ms;
+				width: 75%;
 			}
 
 			.frappe-ai-typing span:nth-child(3) {
-				animation-delay: 240ms;
+				animation-delay: 200ms;
+				width: 50%;
 			}
 
 			.frappe-ai-input-area {
@@ -1625,7 +1810,7 @@ let panelAnimation = null;
 			}
 
 			.frappe-ai-input-row {
-				align-items: flex-end;
+				align-items: center;
 				display: flex;
 				/* // ─── CHANGE 2: Input Row Control Spacing ─── */
 				gap: 6px;
@@ -1783,32 +1968,20 @@ let panelAnimation = null;
 
 			.frappe-ai-token-counter {
 				color: var(--text-muted);
-				font-size: var(--font-size-sm);
-				line-height: 1.2;
-				margin-top: 5px;
-				min-height: 15px;
+				font-size: 10px;
+				line-height: 1;
+				margin-top: 4px;
+				opacity: 0.7;
 				text-align: right;
 			}
 
-			@keyframes frappe-ai-cursor-blink {
-				0%,
-				45% {
-					opacity: 1;
-				}
-				46%,
-				100% {
-					opacity: 0;
-				}
-			}
 
-			@keyframes frappe-ai-dot-bounce {
-				0%,
-				80%,
-				100% {
-					transform: translateY(0);
+			@keyframes frappe-ai-shimmer {
+				0% {
+					background-position: 200% 0;
 				}
-				40% {
-					transform: translateY(-4px);
+				100% {
+					background-position: -200% 0;
 				}
 			}
 
@@ -1866,7 +2039,7 @@ let panelAnimation = null;
 
 	// ─── EVENT HANDLERS ──────────────────────────────────────────────────────────
 	function bindEvents() {
-		dom.fab.addEventListener("click", handleToggle);
+		// Toggle is handled inside _initDrag (pointerdown) to separate tap from drag
 		dom.fab.addEventListener("keydown", handleFabKeydown);
 		dom.closeButton.addEventListener("click", close);
 		dom.newChatButton.addEventListener("click", handleNewChat);
@@ -1895,7 +2068,87 @@ let panelAnimation = null;
 		dom.sendButton.addEventListener("click", handleSendButtonClick);
 		dom.panel.addEventListener("keydown", handlePanelKeydown);
 		dom.messagesArea.addEventListener("click", handleMessagesClick);
+		_initDrag();
 	}
+
+	// ─── Drag-to-reposition (FAB drag moves FAB + panel together) ───
+	function _initDrag() {
+		let dragging = false;
+		let didMove = false;
+		let startX = 0, startY = 0;
+		let startFabRight = 0, startFabBottom = 0;
+
+		function _getFabPos() {
+			const rect = dom.fab.getBoundingClientRect();
+			return {
+				right: window.innerWidth - rect.right,
+				bottom: window.innerHeight - rect.bottom,
+			};
+		}
+
+		function _applyPos(fabRight, fabBottom) {
+			const fabW = dom.fab.offsetWidth || 52;
+			const fabH = dom.fab.offsetHeight || 52;
+			fabRight  = Math.max(0, Math.min(fabRight,  window.innerWidth  - fabW));
+			fabBottom = Math.max(0, Math.min(fabBottom, window.innerHeight - fabH));
+
+			dom.fab.style.right  = fabRight  + "px";
+			dom.fab.style.bottom = fabBottom + "px";
+			dom.fab.style.left   = "auto";
+			dom.fab.style.top    = "auto";
+
+			// Panel sits directly above the FAB, right-aligned with it
+			const panelW = dom.panel.offsetWidth || 380;
+			const panelRight  = fabRight - (panelW / 2) + (fabW / 2);
+			const panelBottom = fabBottom + fabH + 12;
+
+			dom.panel.style.right  = Math.max(0, panelRight)  + "px";
+			dom.panel.style.bottom = Math.max(0, panelBottom) + "px";
+			dom.panel.style.left   = "auto";
+			dom.panel.style.top    = "auto";
+		}
+
+		function onPointerMove(e) {
+			if (!dragging) return;
+			const dx = startX - e.clientX;
+			const dy = startY - e.clientY;
+			if (!didMove && Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
+			didMove = true;
+			dom.fab.classList.add("is-dragging");
+			_applyPos(startFabRight + dx, startFabBottom + dy);
+		}
+
+		function onPointerUp() {
+			if (!dragging) return;
+			dragging = false;
+			dom.fab.classList.remove("is-dragging");
+			document.removeEventListener("pointermove", onPointerMove);
+			document.removeEventListener("pointerup", onPointerUp);
+
+			if (didMove) {
+				// Suppress the click event that follows pointerup after a drag
+				dom.fab.addEventListener("click", (e) => e.stopImmediatePropagation(), { once: true, capture: true });
+			} else {
+				// Clean tap — toggle the panel
+				handleToggle();
+			}
+			didMove = false;
+		}
+
+		dom.fab.addEventListener("pointerdown", (e) => {
+			if (e.button !== 0) return;
+			const pos = _getFabPos();
+			startX = e.clientX;
+			startY = e.clientY;
+			startFabRight  = pos.right;
+			startFabBottom = pos.bottom;
+			dragging = true;
+			didMove  = false;
+			document.addEventListener("pointermove", onPointerMove);
+			document.addEventListener("pointerup", onPointerUp);
+		});
+	}
+	// ─── End Drag ───
 
 	function handleToggle() {
 		if (state.isOpen) {
@@ -2004,12 +2257,31 @@ let panelAnimation = null;
 	}
 
 	function handleConversationListClick(event) {
-		const row = event.target.closest("[data-conversation-id]");
-		if (!row) {
+		const actionBtn = event.target.closest("[data-action]");
+		const action = actionBtn?.getAttribute("data-action");
+
+		if (action === "edit-conversation") {
+			const conversationId = actionBtn.getAttribute("data-conversation-id");
+			_startEditConversationTitle(conversationId);
 			return;
 		}
 
+		if (action === "delete-conversation") {
+			const conversationId = actionBtn.getAttribute("data-conversation-id");
+			_confirmDeleteConversation(conversationId);
+			return;
+		}
+
+		// Default: select conversation
+		const row = event.target.closest("[data-conversation-id]");
+		if (!row) return;
+
+		// Don't select while editing title
+		if (row.closest(".frappe-ai-conversation-row.is-editing")) return;
+
 		const conversationId = row.getAttribute("data-conversation-id");
+		if (!conversationId) return;
+
 		const alreadyLoaded = state.conversations.find(
 			(c) => c.id === conversationId && c.messages.length > 0
 		);
@@ -2019,6 +2291,84 @@ let panelAnimation = null;
 		if (!alreadyLoaded) {
 			loadMessages(conversationId);
 		}
+	}
+
+	function _startEditConversationTitle(conversationId) {
+		const row = dom.historyList.querySelector(
+			`.frappe-ai-conversation-row[data-conversation-id="${conversationId}"]`
+		);
+		if (!row) return;
+		row.classList.add("is-editing");
+		const input = row.querySelector(".frappe-ai-conversation-title-input");
+		if (!input) return;
+		input.focus();
+		input.select();
+
+		function commit() {
+			cleanup();
+			const newTitle = input.value.trim();
+			if (!newTitle) {
+				row.classList.remove("is-editing");
+				return;
+			}
+			frappe.call({
+				method: "frappe_ai.frappe_ai.api.conversation.update_title",
+				args: { conversation_id: conversationId, title: newTitle },
+				callback(response) {
+					if (!response.message) return;
+					const saved = response.message.title;
+					// Update state
+					setState({
+						type: "UPDATE_CONVERSATION_TITLE",
+						conversationId,
+						title: saved,
+					});
+				},
+			});
+		}
+
+		function cancel() {
+			cleanup();
+			row.classList.remove("is-editing");
+		}
+
+		function onKeydown(e) {
+			if (e.key === "Enter") { e.preventDefault(); commit(); }
+			if (e.key === "Escape") { e.preventDefault(); cancel(); }
+		}
+
+		function onBlur() {
+			// small delay so click on action button fires first
+			setTimeout(commit, 120);
+		}
+
+		function cleanup() {
+			row.classList.remove("is-editing");
+			input.removeEventListener("keydown", onKeydown);
+			input.removeEventListener("blur", onBlur);
+		}
+
+		input.addEventListener("keydown", onKeydown);
+		input.addEventListener("blur", onBlur);
+	}
+
+	function _confirmDeleteConversation(conversationId) {
+		const conv = state.conversations.find((c) => c.id === conversationId);
+		const title = conv?.title || "this conversation";
+		frappe.confirm(
+			`Delete "<b>${frappe.utils.escape_html(title)}</b>"? This cannot be undone.`,
+			() => {
+				frappe.call({
+					method: "frappe_ai.frappe_ai.api.conversation.delete",
+					args: { conversation_id: conversationId },
+					callback(response) {
+						if (!response.message) return;
+						setState({ type: "DELETE_CONVERSATION", conversationId });
+						frappe.show_alert({ message: "Conversation deleted.", indicator: "green" }, 3);
+					},
+				});
+			}
+		);
 	}
 	// TODO: API — replace with server-side search in v2
 	// ─── END CHANGE 4 ───
@@ -2122,10 +2472,12 @@ let panelAnimation = null;
 		if (existingId) {
 			setState({ type: "ADD_MESSAGE", conversationId: existingId, message: userMessage }, { skipRender: true });
 			setState({ type: "SHOW_TYPING" });
+			_streamingActive = true;
 			startAssistantTurn(existingId, prompt);
 		} else {
 			// Create conversation on server first, then stream once we have a real ID
 			setState({ type: "SHOW_TYPING" });
+			_streamingActive = true;
 			frappe.call({
 				method: "frappe_ai.frappe_ai.api.conversation.create",
 				callback(response) {
@@ -2338,10 +2690,15 @@ let panelAnimation = null;
 
 	// ─── CHANGE C: fetch-based SSE streaming (replaces EventSource) ───
 	let _streamAbortController = null;
+	let _streamFinished = false;
+	// Synchronous flag — set before the setTimeout fires so loadConversations
+	// never races the timer delay in startAssistantTurn.
+	let _streamingActive = false;
 
 	function startAssistantTurn(conversationId, prompt) {
 		typingTimeout = window.setTimeout(() => {
 			typingTimeout = null;
+			_streamFinished = false;
 
 			const assistantMessage = createMessage("assistant", "", { isStreaming: true });
 			setState({
@@ -2359,105 +2716,114 @@ let panelAnimation = null;
 				sid: frappe.boot?.sid || "",
 			});
 
-			fetch(`/api/method/frappe_ai.frappe_ai.api.chat.stream_message?${params}`, {
-				signal: _streamAbortController.signal,
-				headers: { Accept: "text/event-stream" },
-			})
-				.then((response) => {
-					if (!response.ok) {
-						throw new Error(`HTTP ${response.status}`);
-					}
-					const reader = response.body.getReader();
-					const decoder = new TextDecoder();
-					let buffer = "";
+			async function runStream() {
+				let response;
+				try {
+					response = await fetch(
+						`/api/method/frappe_ai.frappe_ai.api.chat.stream_message?${params}`,
+						{ signal: _streamAbortController.signal, headers: { Accept: "text/event-stream" } }
+					);
+				} catch (err) {
+					if (err.name === "AbortError") return;
+					_log("Stream fetch error:", err);
+					frappe?.show_alert?.({ message: "Connection error. Please try again.", indicator: "red" }, 5);
+					_finishStream(conversationId);
+					return;
+				}
 
-					function processBuffer() {
-						// Parse complete SSE messages from buffer
-						const messages = buffer.split("\n\n");
-						buffer = messages.pop(); // last item may be incomplete
-						for (const block of messages) {
+				if (!response.ok) {
+					_log("Stream HTTP error:", response.status);
+					frappe?.show_alert?.({ message: `Server error (${response.status}). Please try again.`, indicator: "red" }, 5);
+					_finishStream(conversationId);
+					return;
+				}
+
+				const reader = response.body.getReader();
+				const decoder = new TextDecoder();
+				let buffer = "";
+
+				try {
+					while (true) {
+						const { done, value } = await reader.read();
+						if (done) break;
+						buffer += decoder.decode(value, { stream: true });
+						// Process all complete SSE blocks (separated by \n\n)
+						const blocks = buffer.split("\n\n");
+						buffer = blocks.pop(); // keep incomplete tail
+						for (const block of blocks) {
 							if (!block.trim()) continue;
 							let eventType = "message";
 							let dataLine = "";
 							for (const line of block.split("\n")) {
-								if (line.startsWith("event:")) {
-									eventType = line.slice(6).trim();
-								} else if (line.startsWith("data:")) {
-									dataLine = line.slice(5).trim();
-								}
+								if (line.startsWith("event:")) eventType = line.slice(6).trim();
+								else if (line.startsWith("data:")) dataLine = line.slice(5).trim();
 							}
-							handleSseEvent(eventType, dataLine);
+							handleSseEvent(eventType, dataLine, conversationId);
 						}
 					}
-
-					function pump() {
-						return reader.read().then(({ done, value }) => {
-							if (done) {
-								// Flush remaining buffer
-								if (buffer.trim()) {
-									buffer += "\n\n";
-									processBuffer();
-								}
-								_finishStream(conversationId);
-								return;
+					// Flush any remaining buffer
+					if (buffer.trim()) {
+						buffer += "\n\n";
+						const blocks = buffer.split("\n\n");
+						for (const block of blocks) {
+							if (!block.trim()) continue;
+							let eventType = "message";
+							let dataLine = "";
+							for (const line of block.split("\n")) {
+								if (line.startsWith("event:")) eventType = line.slice(6).trim();
+								else if (line.startsWith("data:")) dataLine = line.slice(5).trim();
 							}
-							buffer += decoder.decode(value, { stream: true });
-							processBuffer();
-							return pump();
-						});
+							handleSseEvent(eventType, dataLine, conversationId);
+						}
 					}
-
-					return pump();
-				})
-				.catch((err) => {
-					if (err.name === "AbortError") return; // user stopped — already handled
-					_log("Stream fetch error:", err);
-					if (frappe?.show_alert) {
-						frappe.show_alert({ message: "Connection error. Please try again.", indicator: "red" }, 5);
+				} catch (err) {
+					if (err.name !== "AbortError") {
+						_log("Stream read error:", err);
 					}
-					_finishStream(conversationId);
-				});
-
-			function handleSseEvent(eventType, dataLine) {
-				let data = {};
-				try { data = JSON.parse(dataLine || "{}"); } catch (_) {}
-
-				if (eventType === "token") {
-					setState({ type: "APPEND_STREAM_CHUNK", conversationId, chunk: data.delta || "" });
-
-				} else if (eventType === "done") {
-					const usage = data.usage || {};
-					const tokens = (usage.input || 0) + (usage.output || 0);
-					if (dom.tokenCounter) dom.tokenCounter.textContent = `~${tokens} tokens`;
-
-				} else if (eventType === "title_update") {
-					if (data.title) {
-						// Update conversation title in state immediately
-						setState({
-							type: "LOAD_MESSAGES",
-							conversationId,
-							messages: (() => {
-								const found = state.conversations.find((c) => c.id === conversationId);
-								return found ? found.messages : [];
-							})(),
-							title: data.title,
-							last_message: (() => {
-								const found = state.conversations.find((c) => c.id === conversationId);
-								return found ? found.last_message : "";
-							})(),
-						});
-					}
-
-				} else if (eventType === "error") {
-					if (frappe?.show_alert) {
-						frappe.show_alert({ message: data.message || "An error occurred.", indicator: "red" }, 5);
-					}
+				} finally {
+					reader.releaseLock();
 				}
+
+				_finishStream(conversationId);
 			}
+
+			runStream();
 		}, TYPING_DELAY_MS);
 	}
 
+	function handleSseEvent(eventType, dataLine, conversationId) {
+		let data = {};
+		try { data = JSON.parse(dataLine || "{}"); } catch (_) {}
+
+		if (eventType === "token") {
+			setState({ type: "APPEND_STREAM_CHUNK", conversationId, chunk: data.delta || "" });
+
+		} else if (eventType === "done") {
+			const usage = data.usage || {};
+			const tokens = (usage.input || 0) + (usage.output || 0);
+			if (dom.tokenCounter) dom.tokenCounter.textContent = `~${tokens} tokens`;
+
+		} else if (eventType === "title_update") {
+			if (data.title) {
+				const found = state.conversations.find((c) => c.id === conversationId);
+				setState({
+					type: "LOAD_MESSAGES",
+					conversationId,
+					messages: found ? found.messages : [],
+					title: data.title,
+					last_message: found ? found.last_message : "",
+				});
+			}
+
+		} else if (eventType === "error") {
+			frappe?.show_alert?.({ message: data.message || "An error occurred.", indicator: "red" }, 5);
+		}
+	}
+
 	function _finishStream(conversationId) {
+		if (_streamFinished) return; // guard against double-fire
+		_streamFinished = true;
+		_streamingActive = false;
 		_streamAbortController = null;
 		setState({ type: "FINISH_STREAM", conversationId });
 		loadConversations();
@@ -2475,6 +2841,7 @@ let panelAnimation = null;
 			_streamAbortController.abort();
 			_streamAbortController = null;
 		}
+		_streamingActive = false;
 
 		const conversationId = getActiveConversationId();
 		if (conversationId) {
@@ -2532,16 +2899,35 @@ let panelAnimation = null;
 		dom.badge.classList.toggle("is-visible", Boolean(state.hasUnread && !state.isOpen));
 	}
 
+	function _isToolCallJson(content) {
+		if (!content || !content.includes('"name"')) return false;
+		const s = content.trim();
+		// Single object: {"type":"function","name":"...",...} or {"name":"...","parameters":{}}
+		if (s.startsWith("{") && s.endsWith("}")) {
+			try {
+				const p = JSON.parse(s);
+				if (p && typeof p === "object" && (p.type === "function" || (p.name && (p.parameters !== undefined || p.arguments !== undefined)))) return true;
+			} catch (_) {}
+		}
+		// Array of tool call objects
+		if (s.startsWith("[") && s.endsWith("]")) {
+			try {
+				const arr = JSON.parse(s);
+				if (Array.isArray(arr) && arr.length && arr.every((i) => i && (i.type === "function" || i.name))) return true;
+			} catch (_) {}
+		}
+		return false;
+	}
+
 	function renderMessages() {
 		const conversation = getActiveConversation();
-		const messages = conversation?.messages || [];
+		const allMessages = conversation?.messages || [];
+		// Filter out raw tool-call JSON blobs that slipped through from older responses
+		const messages = allMessages.filter(
+			(m) => !(m.role === "assistant" && _isToolCallJson(m.content))
+		);
 
 		dom.messagesArea.innerHTML = "";
-
-		// ─── CHANGE 4: Render Search Results In Messages Area ───
-		// ─── CHANGE 8: Search results moved to history drawer — no longer rendered in messages area ───
-		// ─── END CHANGE 8 ───
-		// ─── END CHANGE 4 ───
 
 		if (!messages.length && !state.isTyping) {
 			dom.messagesArea.appendChild(buildEmptyState());
@@ -2616,15 +3002,23 @@ let panelAnimation = null;
 	}
 
 	function buildConversationRow(conversation) {
-		const row = document.createElement("button");
-		row.type = "button";
+		const row = document.createElement("div");
 		row.className = "frappe-ai-conversation-row";
 		row.classList.toggle("is-active", conversation.id === state.activeConversationId);
 		row.setAttribute("data-conversation-id", conversation.id);
 		row.innerHTML = `
-			<div class="frappe-ai-conversation-title">${escapeHtml(conversation.title)}</div>
-			<div class="frappe-ai-conversation-snippet">${escapeHtml(truncateText(conversation.last_message, 60))}</div>
-			<div class="frappe-ai-conversation-time">${escapeHtml(conversation.timestamp || "")}</div>
+			<button class="frappe-ai-conversation-body" type="button" data-action="select-conversation" data-conversation-id="${escapeHtml(conversation.id)}">
+				<div class="frappe-ai-conversation-title-wrap">
+					<span class="frappe-ai-conversation-title">${escapeHtml(conversation.title)}</span>
+					<input class="frappe-ai-conversation-title-input" type="text" value="${escapeHtml(conversation.title)}" maxlength="120" />
+				</div>
+				<div class="frappe-ai-conversation-snippet">${escapeHtml(truncateText(conversation.last_message, 60))}</div>
+				<div class="frappe-ai-conversation-time">${escapeHtml(conversation.timestamp || "")}</div>
+			</button>
+			<div class="frappe-ai-conversation-actions">
+				<button class="frappe-ai-conv-action-btn" type="button" data-action="edit-conversation" data-conversation-id="${escapeHtml(conversation.id)}" aria-label="Rename conversation">${getIcon("edit")}</button>
+				<button class="frappe-ai-conv-action-btn is-danger" type="button" data-action="delete-conversation" data-conversation-id="${escapeHtml(conversation.id)}" aria-label="Delete conversation">${getIcon("trash")}</button>
+			</div>
 		`;
 		return row;
 	}
@@ -2699,7 +3093,11 @@ let panelAnimation = null;
 		const content = wrapper.querySelector(".frappe-ai-bubble-content");
 		content.innerHTML = renderMarkdown(message.content);
 		if (message.isStreaming) {
-			content.insertAdjacentHTML("beforeend", '<span class="frappe-ai-stream-cursor">|</span>');
+			content.insertAdjacentHTML("beforeend", `
+				<div class="frappe-ai-typing frappe-ai-stream-thinking">
+					<span></span><span></span><span></span>
+				</div>
+			`);
 		}
 		enhanceCodeBlocks(content);
 
@@ -2834,46 +3232,57 @@ let panelAnimation = null;
 	// ─── API LAYER ───────────────────────────────────────────────────────────────
 
 	// ─── CHANGE A: Wire getConversations ───
+	let _loadConversationsTimer = null;
 	function loadConversations() {
-		frappe.call({
-			method: "frappe_ai.frappe_ai.api.conversation.get_list",
-			args: { page: 0, limit: 50 },
-			callback(response) {
-				if (!response.message) return;
-				const { conversations } = response.message;
-				// Preserve already-loaded messages so the active chat doesn't blank out
-				const existingById = {};
-				for (const c of state.conversations) {
-					existingById[c.id] = c;
-				}
-				const mapped = (conversations || []).map((conversation) => {
-					const existing = existingById[conversation.name];
-					return {
-						id: conversation.name,
-						title: conversation.title || "New Conversation",
-						last_message: conversation.last_message || "",
-						timestamp: conversation.modified ? _relativeDate(conversation.modified) : "",
-						is_pinned: conversation.is_pinned,
-						// Keep loaded messages — don't wipe them on refresh
-						messages: existing ? existing.messages : [],
-					};
-				});
-				// Restore last active conversation from session, falling back to current state
-				const currentId = state.activeConversationId
-					|| sessionStorage.getItem(SESSION_KEY);
-				const stillExists = mapped.some((c) => c.id === currentId);
-				const restoredId = stillExists ? currentId : null;
-				setState({
-					type: "LOAD_CONVERSATIONS",
-					conversations: mapped,
-					activeConversationId: restoredId,
-				});
-				// Load messages for restored conversation if not already loaded
-				if (restoredId && !state.conversations.find((c) => c.id === restoredId)?.messages?.length) {
-					loadMessages(restoredId);
-				}
-			},
-		});
+		// Never fire while a stream is active — the XHR would queue behind the
+		// occupied Frappe worker thread and appear stuck for minutes.
+		// _streamingActive is set synchronously in submitPrompt, before the
+		// setTimeout in startAssistantTurn fires, closing the timing gap.
+		if (_streamingActive) return;
+		// Debounce — collapse rapid successive calls into one
+		if (_loadConversationsTimer) return;
+		_loadConversationsTimer = window.setTimeout(() => { _loadConversationsTimer = null; }, 2000);
+		setTimeout(() => {
+			frappe.call({
+				method: "frappe_ai.frappe_ai.api.conversation.get_list",
+				args: { page: 0, limit: 50 },
+				callback(response) {
+					if (!response.message) return;
+					const { conversations } = response.message;
+					// Preserve already-loaded messages so the active chat doesn't blank out
+					const existingById = {};
+					for (const c of state.conversations) {
+						existingById[c.id] = c;
+					}
+					const mapped = (conversations || []).map((conversation) => {
+						const existing = existingById[conversation.name];
+						return {
+							id: conversation.name,
+							title: conversation.title || "New Conversation",
+							last_message: conversation.last_message || "",
+							timestamp: conversation.modified ? _relativeDate(conversation.modified) : "",
+							is_pinned: conversation.is_pinned,
+							// Keep loaded messages — don't wipe them on refresh
+							messages: existing ? existing.messages : [],
+						};
+					});
+					// Restore last active conversation from session, falling back to current state
+					const currentId = state.activeConversationId
+						|| sessionStorage.getItem(SESSION_KEY);
+					const stillExists = mapped.some((c) => c.id === currentId);
+					const restoredId = stillExists ? currentId : null;
+					setState({
+						type: "LOAD_CONVERSATIONS",
+						conversations: mapped,
+						activeConversationId: restoredId,
+					});
+					// Load messages for restored conversation if not already loaded
+					if (restoredId && !state.conversations.find((c) => c.id === restoredId)?.messages?.length) {
+						loadMessages(restoredId);
+					}
+				},
+			});
+		}, 100);
 	}
 
 	function loadMessages(conversationId) {
@@ -2924,6 +3333,10 @@ let panelAnimation = null;
 		const agentIndicator = dom.root.querySelector(".frappe-ai-agent-indicator");
 		if (agentIndicator) {
 			agentIndicator.style.display = settings.tool_calling_enabled ? "" : "none";
+		}
+		const providerBadge = dom.root.querySelector(".frappe-ai-provider-badge");
+		if (providerBadge && settings.provider) {
+			providerBadge.textContent = settings.provider;
 		}
 	}
 	// ─── END CHANGE E ───
