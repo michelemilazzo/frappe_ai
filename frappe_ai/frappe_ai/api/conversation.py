@@ -11,7 +11,7 @@ def _require_owner(conversation_id: str) -> object:
 
 
 @frappe.whitelist()
-def list(page=0, limit=20):
+def get_list(page=0, limit=20):
 	user = frappe.session.user
 	page = int(page or 0)
 	limit = min(int(limit or 20), 100)
@@ -22,6 +22,7 @@ def list(page=0, limit=20):
 		fields=[
 			"name",
 			"title",
+			"last_message",
 			"model_used",
 			"provider_used",
 			"modified",
@@ -34,29 +35,6 @@ def list(page=0, limit=20):
 		start=page * limit,
 		ignore_permissions=False,
 	)
-
-	# Attach the last assistant message content as a snippet for each conversation
-	if conversations:
-		names = [c.name for c in conversations]
-		placeholders = ", ".join(["%s"] * len(names))
-		rows = frappe.db.sql(
-			f"""
-			SELECT m.parent, m.content
-			FROM `tabAI Message` m
-			INNER JOIN (
-				SELECT parent, MAX(idx) AS max_idx
-				FROM `tabAI Message`
-				WHERE parent IN ({placeholders}) AND role = 'assistant'
-				GROUP BY parent
-			) latest ON m.parent = latest.parent AND m.idx = latest.max_idx
-			""",
-			tuple(names),
-			as_dict=True,
-		)
-		snippet_map = {r.parent: r.content for r in rows}
-		for c in conversations:
-			raw = snippet_map.get(c.name, "")
-			c["last_message"] = (raw[:80] + "…") if len(raw) > 80 else raw
 
 	total = frappe.db.count("AI Conversation", {"owner": user, "is_archived": 0})
 

@@ -7,6 +7,7 @@
 	"engine": "InnoDB",
 	"field_order": [
 		"title",
+		"last_message",
 		"model_used",
 		"provider_used",
 		"column_break_1",
@@ -25,6 +26,12 @@
 			"fieldtype": "Data",
 			"label": "Title",
 			"default": "New Conversation"
+		},
+		{
+			"fieldname": "last_message",
+			"fieldtype": "Small Text",
+			"label": "Last Message",
+			"read_only": 1
 		},
 		{
 			"fieldname": "model_used",

@@ -48,98 +48,123 @@ def _auto_title(text: str) -> str:
 @frappe.whitelist()
 def stream_message(conversation_id: str, message: str, attachment: str = None):
 	"""
-	All frappe.local usage happens synchronously here before returning the Response.
-	The generator only iterates over pre-built SSE strings — no frappe context needed.
+	Validate input and save the user message synchronously, then return a
+	streaming Response whose generator runs the AI call and DB saves.
+	frappe.local stays alive for the full generator lifetime (ClosingIterator).
 	"""
-	sse_chunks = []
+	# --- synchronous pre-flight ---
+	if not conversation_id:
+		return _make_response([_sse("error", {"code": "invalid_input", "message": "conversation_id is required."})])
+
+	msg = (message or "").strip()
+	if not msg:
+		return _make_response([_sse("error", {"code": "invalid_input", "message": "Message cannot be blank."})])
+
+	if len(msg) > 32000:
+		return _make_response([_sse("error", {"code": "invalid_input", "message": "Message too long (max 32,000 characters)."})])
+
+	user = frappe.session.user
 
 	try:
-		# 1. Input validation
-		if not conversation_id:
-			sse_chunks.append(_sse("error", {"code": "invalid_input", "message": "conversation_id is required."}))
-			return _make_response(sse_chunks)
-
-		msg = (message or "").strip()
-		if not msg:
-			sse_chunks.append(_sse("error", {"code": "invalid_input", "message": "Message cannot be blank."}))
-			return _make_response(sse_chunks)
-
-		if len(msg) > 32000:
-			sse_chunks.append(_sse("error", {"code": "invalid_input", "message": "Message too long (max 32,000 characters)."}))
-			return _make_response(sse_chunks)
-
-		user = frappe.session.user
 		conv_doc = _require_conversation(conversation_id, user)
+	except frappe.PermissionError:
+		return _make_response([_sse("error", {"code": "forbidden", "message": "Access denied."})])
 
-		attach = attachment
-		if attach:
-			if not frappe.db.exists("File", {"name": attach, "attached_to_name": user}):
-				attach = None
+	attach = attachment
+	if attach:
+		if not frappe.db.exists("File", {"name": attach, "attached_to_name": user}):
+			attach = None
 
-		# 2. Load settings + rate limit
-		from frappe_ai.frappe_ai.ai_engine.rate_limiter import check_and_increment
-		from frappe_ai.frappe_ai.ai_engine.router import get_provider, get_settings
+	from frappe_ai.frappe_ai.ai_engine.rate_limiter import check_and_increment
+	from frappe_ai.frappe_ai.ai_engine.router import get_provider, get_settings
 
+	try:
 		settings = get_settings()
 		check_and_increment(user, settings)
-		provider = get_provider(settings)
+	except ProviderRateLimitError as exc:
+		retry_after = getattr(exc, "retry_after", None)
+		user_msg = str(exc)
+		if retry_after:
+			user_msg = f"{user_msg} Retry in {retry_after}s."
+		return _make_response([_sse("error", {"code": "rate_limit", "message": user_msg, "retry_after": retry_after})])
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "AI stream_message settings error")
+		return _make_response([_sse("error", {"code": "server_error", "message": "Unexpected error. Please try again."})])
 
-		# 3. Save user message
-		input_tokens = 0
-		try:
-			input_tokens = provider.count_tokens([{"role": "user", "content": msg}])
-		except Exception:
-			pass
+	provider = get_provider(settings)
 
-		conv_doc.append(
-			"messages",
-			{
-				"role": "user",
-				"content": msg,
-				"input_tokens": input_tokens,
-				"timestamp": frappe.utils.now(),
-				"attachment": attach,
-			},
-		)
-		conv_doc.save(ignore_permissions=False)
-		frappe.db.commit()
+	# Save user message before streaming begins
+	input_tokens = 0
+	try:
+		input_tokens = provider.count_tokens([{"role": "user", "content": msg}])
+	except Exception:
+		pass
 
-		# 4. Build context
-		from frappe_ai.frappe_ai.ai_engine.context_manager import build_context
+	conv_doc.append(
+		"messages",
+		{
+			"role": "user",
+			"content": msg,
+			"input_tokens": input_tokens,
+			"timestamp": frappe.utils.now(),
+			"attachment": attach,
+		},
+	)
+	conv_doc.save(ignore_permissions=False)
+	frappe.db.commit()
 
-		context_messages = build_context(conversation_id, msg, user, settings)
+	# Build context and tools before generator (reads DB — safe here)
+	from frappe_ai.frappe_ai.ai_engine.context_manager import build_context
 
-		# 5. Tools
-		tools = []
-		if settings.get("tool_calling_enabled"):
-			from frappe_ai.frappe_ai.ai_engine.agents.tool_registry import get_tools_for_llm
+	context_messages = build_context(conversation_id, msg, user, settings)
 
-			tools = get_tools_for_llm(user)
+	tools = []
+	if settings.get("tool_calling_enabled"):
+		from frappe_ai.frappe_ai.ai_engine.agents.tool_registry import get_tools_for_llm
 
-		# 6. Run agent — collect all events synchronously
-		from frappe_ai.frappe_ai.ai_engine.agents.agent_runner import run as agent_run
+		tools = get_tools_for_llm(user)
 
-		collected_events = []
+	# Snapshot mutable state needed inside the generator
+	is_new_conversation = conv_doc.title == "New Conversation"
 
-		def on_event(evt):
-			collected_events.append(evt)
+	return _make_response(_generate_stream(
+		conversation_id=conversation_id,
+		user=user,
+		provider=provider,
+		context_messages=context_messages,
+		tools=tools,
+		settings=settings,
+		msg=msg,
+		is_new_conversation=is_new_conversation,
+	))
 
-		agent_run(
-			messages=context_messages,
-			provider=provider,
-			user=user,
-			stream=True,
-			on_event=on_event,
-		)
 
-		# 7. Check abort flag (set before we ran — edge case)
-		aborted = bool(frappe.cache().get_value(_abort_key(user, conversation_id)))
+def _generate_stream(
+	conversation_id: str,
+	user: str,
+	provider,
+	context_messages: list,
+	tools: list,
+	settings: dict,
+	msg: str,
+	is_new_conversation: bool,
+):
+	"""
+	Generator that runs inside the Werkzeug ClosingIterator.
+	frappe.local (db, cache, session) is fully available here.
+	"""
+	from frappe_ai.frappe_ai.ai_engine.agents.agent_runner import run as agent_run
 
-		full_text = ""
-		final_usage = {"input_tokens": 0, "output_tokens": 0}
+	full_text = ""
+	final_usage = {"input_tokens": 0, "output_tokens": 0}
+	aborted = False
+	abort_key = _abort_key(user, conversation_id)
 
-		for evt in collected_events:
-			if aborted:
+	try:
+		for evt in _iter_agent_events(agent_run, context_messages, provider, user, tools):
+			# Check abort before yielding each event
+			if frappe.cache().get_value(abort_key):
+				aborted = True
 				break
 
 			event_type = evt.get("event")
@@ -148,25 +173,25 @@ def stream_message(conversation_id: str, message: str, attachment: str = None):
 			if event_type == "token":
 				delta = data.get("delta", "")
 				full_text += delta
-				sse_chunks.append(_sse("token", {"delta": delta}))
+				yield _sse("token", {"delta": delta})
 
 			elif event_type == "tool_start":
-				sse_chunks.append(_sse("tool_start", {"tool": data.get("tool", ""), "args": data.get("args", {})}))
+				yield _sse("tool_start", {"tool": data.get("tool", ""), "args": data.get("args", {})})
 
 			elif event_type == "tool_result":
-				sse_chunks.append(_sse("tool_result", {"tool": data.get("tool", ""), "result": data.get("result", {})}))
+				yield _sse("tool_result", {"tool": data.get("tool", ""), "result": data.get("result", {})})
 
 			elif event_type == "done":
 				usage = data.get("usage", {})
 				final_usage["input_tokens"] = usage.get("input", 0)
 				final_usage["output_tokens"] = usage.get("output", 0)
-				sse_chunks.append(_sse(
+				yield _sse(
 					"done",
 					{
 						"finish_reason": data.get("finish_reason", "stop"),
 						"usage": {"input": final_usage["input_tokens"], "output": final_usage["output_tokens"]},
 					},
-				))
+				)
 
 			elif event_type == "error":
 				err_msg = data.get("message", "")
@@ -175,11 +200,32 @@ def stream_message(conversation_id: str, message: str, attachment: str = None):
 					f"Provider error during stream\nCode: {err_code}\nMessage: {err_msg}",
 					"AI stream_message provider event error",
 				)
-				sse_chunks.append(_sse("error", {"code": err_code, "message": err_msg}))
+				yield _sse("error", {"code": err_code, "message": err_msg})
 
-		# 8. Persist assistant message
-		if not aborted:
-			conv_doc.reload()
+	except ProviderRateLimitError as exc:
+		retry_after = getattr(exc, "retry_after", None)
+		user_msg = str(exc)
+		if retry_after:
+			user_msg = f"{user_msg} Retry in {retry_after}s."
+		yield _sse("error", {"code": "rate_limit", "message": user_msg, "retry_after": retry_after})
+		return
+	except ProviderAuthError:
+		frappe.log_error(frappe.get_traceback(), "AI stream_message auth error")
+		yield _sse("error", {"code": "auth_error", "message": "Invalid API key. Please check AI Assistant Settings."})
+		return
+	except ProviderError as exc:
+		frappe.log_error(frappe.get_traceback(), "AI stream_message provider error")
+		yield _sse("error", {"code": "provider_error", "message": str(exc)})
+		return
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "AI stream_message unexpected error")
+		yield _sse("error", {"code": "server_error", "message": "Unexpected error. Please try again."})
+		return
+
+	# DB saves after streaming completes
+	if not aborted:
+		try:
+			conv_doc = frappe.get_doc("AI Conversation", conversation_id)
 			conv_doc.append(
 				"messages",
 				{
@@ -192,43 +238,53 @@ def stream_message(conversation_id: str, message: str, attachment: str = None):
 			)
 			conv_doc.total_input_tokens = (conv_doc.total_input_tokens or 0) + final_usage["input_tokens"]
 			conv_doc.total_output_tokens = (conv_doc.total_output_tokens or 0) + final_usage["output_tokens"]
+			snippet = full_text[:120].strip()
+			conv_doc.last_message = (snippet + "…") if len(full_text) > 120 else snippet
 			conv_doc.save(ignore_permissions=False)
 			_save_usage_log(user, settings, final_usage, conversation_id)
 			frappe.db.commit()
+		except Exception:
+			frappe.log_error(frappe.get_traceback(), "AI stream_message save assistant message error")
 
-		# 9. Auto-title on first exchange
-		if conv_doc.title == "New Conversation" and not aborted:
-			new_title = _auto_title(msg)
-			frappe.db.set_value("AI Conversation", conversation_id, "title", new_title)
-			frappe.db.commit()
-			sse_chunks.append(_sse("title_update", {"title": new_title}))
-
-	except ProviderRateLimitError as exc:
-		retry_after = getattr(exc, "retry_after", None)
-		user_msg = str(exc)
-		if retry_after:
-			user_msg = f"{user_msg} Retry in {retry_after}s."
-		sse_chunks.append(_sse(
-			"error",
-			{"code": "rate_limit", "message": user_msg, "retry_after": retry_after},
-		))
-	except ProviderAuthError as exc:
-		frappe.log_error(frappe.get_traceback(), "AI stream_message auth error")
-		sse_chunks.append(_sse("error", {"code": "auth_error", "message": "Invalid API key. Please check AI Assistant Settings."}))
-	except ProviderError as exc:
-		frappe.log_error(frappe.get_traceback(), "AI stream_message provider error")
-		sse_chunks.append(_sse("error", {"code": "provider_error", "message": str(exc)}))
-	except Exception:
-		frappe.log_error(frappe.get_traceback(), "AI stream_message unexpected error")
-		sse_chunks.append(_sse("error", {"code": "server_error", "message": "Unexpected error. Please try again."}))
-
-	return _make_response(sse_chunks)
+		# Auto-title on first exchange
+		if is_new_conversation:
+			try:
+				new_title = _auto_title(msg)
+				frappe.db.set_value("AI Conversation", conversation_id, "title", new_title)
+				frappe.db.commit()
+				yield _sse("title_update", {"title": new_title})
+			except Exception:
+				frappe.log_error(frappe.get_traceback(), "AI stream_message auto-title error")
 
 
-def _make_response(chunks: list) -> Response:
-	body = "".join(chunks)
+def _iter_agent_events(agent_run_fn, messages, provider, user, tools):
+	"""Yield events from the agent runner one at a time."""
+	collected = []
+
+	def on_event(evt):
+		collected.append(evt)
+
+	agent_run_fn(
+		messages=messages,
+		provider=provider,
+		user=user,
+		stream=True,
+		on_event=on_event,
+	)
+
+	yield from collected
+
+
+def _make_response(body) -> Response:
+	"""
+	Accept either a list (pre-collected chunks) or a generator.
+	Werkzeug will iterate it inside ClosingIterator, keeping frappe.local alive.
+	"""
+	def _iter(data):
+		yield from data
+
 	return Response(
-		body,
+		_iter(body),
 		content_type="text/event-stream",
 		headers={
 			"Cache-Control": "no-cache",

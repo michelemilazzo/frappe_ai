@@ -339,8 +339,18 @@ let panelAnimation = null;
 		};
 	}
 
+	const SESSION_KEY = "frappe_ai_active_conversation";
+
 	function setState(action, options) {
+		const prev = state.activeConversationId;
 		state = reducer(state, action);
+		if (state.activeConversationId !== prev) {
+			if (state.activeConversationId) {
+				sessionStorage.setItem(SESSION_KEY, state.activeConversationId);
+			} else {
+				sessionStorage.removeItem(SESSION_KEY);
+			}
+		}
 		if (options?.skipRender) {
 			return;
 		}
@@ -1300,6 +1310,27 @@ let panelAnimation = null;
 
 			.frappe-ai-bubble-content {
 				overflow-wrap: anywhere;
+			}
+
+			.frappe-ai-bubble-content a {
+				color: var(--primary-color);
+				text-decoration: underline;
+				text-underline-offset: 2px;
+				word-break: break-all;
+			}
+
+			.frappe-ai-bubble-content a:hover {
+				color: var(--btn-primary-hover, var(--primary-color));
+				text-decoration: none;
+			}
+
+			.frappe-ai-message.is-user .frappe-ai-bubble-content a {
+				color: inherit;
+				opacity: 0.85;
+			}
+
+			.frappe-ai-message.is-user .frappe-ai-bubble-content a:hover {
+				opacity: 1;
 			}
 
 			.frappe-ai-bubble-content > :first-child {
@@ -2305,8 +2336,8 @@ let panelAnimation = null;
 
 	// ─── STREAM ENGINE ───────────────────────────────────────────────────────────
 
-	// ─── CHANGE C: Replace simulation with real EventSource SSE streaming ───
-	let _activeEventSource = null;
+	// ─── CHANGE C: fetch-based SSE streaming (replaces EventSource) ───
+	let _streamAbortController = null;
 
 	function startAssistantTurn(conversationId, prompt) {
 		typingTimeout = window.setTimeout(() => {
@@ -2320,79 +2351,116 @@ let panelAnimation = null;
 				streamInterval: null,
 			});
 
+			_streamAbortController = new AbortController();
+
 			const params = new URLSearchParams({
 				conversation_id: conversationId,
 				message: prompt,
 				sid: frappe.boot?.sid || "",
 			});
 
-			const es = new EventSource(`/api/method/frappe_ai.frappe_ai.api.chat.stream_message?${params}`);
-			_activeEventSource = es;
+			fetch(`/api/method/frappe_ai.frappe_ai.api.chat.stream_message?${params}`, {
+				signal: _streamAbortController.signal,
+				headers: { Accept: "text/event-stream" },
+			})
+				.then((response) => {
+					if (!response.ok) {
+						throw new Error(`HTTP ${response.status}`);
+					}
+					const reader = response.body.getReader();
+					const decoder = new TextDecoder();
+					let buffer = "";
 
-			es.addEventListener("token", (event) => {
-				const data = JSON.parse(event.data || "{}");
-				setState({
-					type: "APPEND_STREAM_CHUNK",
-					conversationId,
-					chunk: data.delta || "",
+					function processBuffer() {
+						// Parse complete SSE messages from buffer
+						const messages = buffer.split("\n\n");
+						buffer = messages.pop(); // last item may be incomplete
+						for (const block of messages) {
+							if (!block.trim()) continue;
+							let eventType = "message";
+							let dataLine = "";
+							for (const line of block.split("\n")) {
+								if (line.startsWith("event:")) {
+									eventType = line.slice(6).trim();
+								} else if (line.startsWith("data:")) {
+									dataLine = line.slice(5).trim();
+								}
+							}
+							handleSseEvent(eventType, dataLine);
+						}
+					}
+
+					function pump() {
+						return reader.read().then(({ done, value }) => {
+							if (done) {
+								// Flush remaining buffer
+								if (buffer.trim()) {
+									buffer += "\n\n";
+									processBuffer();
+								}
+								_finishStream(conversationId);
+								return;
+							}
+							buffer += decoder.decode(value, { stream: true });
+							processBuffer();
+							return pump();
+						});
+					}
+
+					return pump();
+				})
+				.catch((err) => {
+					if (err.name === "AbortError") return; // user stopped — already handled
+					_log("Stream fetch error:", err);
+					if (frappe?.show_alert) {
+						frappe.show_alert({ message: "Connection error. Please try again.", indicator: "red" }, 5);
+					}
+					_finishStream(conversationId);
 				});
-			});
 
-			es.addEventListener("tool_start", () => {});
+			function handleSseEvent(eventType, dataLine) {
+				let data = {};
+				try { data = JSON.parse(dataLine || "{}"); } catch (_) {}
 
-			es.addEventListener("tool_result", () => {});
+				if (eventType === "token") {
+					setState({ type: "APPEND_STREAM_CHUNK", conversationId, chunk: data.delta || "" });
 
-			es.addEventListener("done", (event) => {
-				const data = JSON.parse(event.data || "{}");
-				const usage = data.usage || {};
-				const tokens = (usage.input || 0) + (usage.output || 0);
-				if (dom.tokenCounter) {
-					dom.tokenCounter.textContent = `~${tokens} tokens`;
-				}
-				es.close();
-				_activeEventSource = null;
-				setState({ type: "FINISH_STREAM", conversationId });
-				// Refresh conversation list so sidebar shows updated title + snippet
-				loadConversations();
-			});
+				} else if (eventType === "done") {
+					const usage = data.usage || {};
+					const tokens = (usage.input || 0) + (usage.output || 0);
+					if (dom.tokenCounter) dom.tokenCounter.textContent = `~${tokens} tokens`;
 
-			es.addEventListener("title_update", (event) => {
-				const data = JSON.parse(event.data || "{}");
-				if (!data.title) return;
-				// Update the title in state directly without a full reload
-				setState({
-					type: "LOAD_MESSAGES",
-					conversationId,
-					messages: (() => {
-						const found = state.conversations.find((c) => c.id === conversationId);
-						return found ? found.messages : [];
-					})(),
-					title: data.title,
-					last_message: (() => {
-						const found = state.conversations.find((c) => c.id === conversationId);
-						return found ? found.last_message : "";
-					})(),
-				});
-			});
+				} else if (eventType === "title_update") {
+					if (data.title) {
+						// Update conversation title in state immediately
+						setState({
+							type: "LOAD_MESSAGES",
+							conversationId,
+							messages: (() => {
+								const found = state.conversations.find((c) => c.id === conversationId);
+								return found ? found.messages : [];
+							})(),
+							title: data.title,
+							last_message: (() => {
+								const found = state.conversations.find((c) => c.id === conversationId);
+								return found ? found.last_message : "";
+							})(),
+						});
+					}
 
-			es.addEventListener("error", (event) => {
-				if (event.data) {
-					const data = JSON.parse(event.data || "{}");
+				} else if (eventType === "error") {
 					if (frappe?.show_alert) {
 						frappe.show_alert({ message: data.message || "An error occurred.", indicator: "red" }, 5);
 					}
 				}
-				es.close();
-				_activeEventSource = null;
-				setState({ type: "FINISH_STREAM", conversationId });
-			});
-
-			es.onerror = () => {
-				es.close();
-				_activeEventSource = null;
-				setState({ type: "FINISH_STREAM", conversationId });
-			};
+			}
 		}, TYPING_DELAY_MS);
+	}
+
+	function _finishStream(conversationId) {
+		_streamAbortController = null;
+		setState({ type: "FINISH_STREAM", conversationId });
+		loadConversations();
 	}
 	// ─── END CHANGE C ───
 
@@ -2403,9 +2471,9 @@ let panelAnimation = null;
 			typingTimeout = null;
 		}
 
-		if (_activeEventSource) {
-			_activeEventSource.close();
-			_activeEventSource = null;
+		if (_streamAbortController) {
+			_streamAbortController.abort();
+			_streamAbortController = null;
 		}
 
 		const conversationId = getActiveConversationId();
@@ -2768,27 +2836,42 @@ let panelAnimation = null;
 	// ─── CHANGE A: Wire getConversations ───
 	function loadConversations() {
 		frappe.call({
-			method: "frappe_ai.frappe_ai.api.conversation.list",
+			method: "frappe_ai.frappe_ai.api.conversation.get_list",
 			args: { page: 0, limit: 50 },
 			callback(response) {
 				if (!response.message) return;
 				const { conversations } = response.message;
-				const mapped = (conversations || []).map((conversation) => ({
-					id: conversation.name,
-					title: conversation.title || "New Conversation",
-					last_message: conversation.last_message || "",
-					timestamp: conversation.modified ? _relativeDate(conversation.modified) : "",
-					is_pinned: conversation.is_pinned,
-					messages: [],
-				}));
-				// Preserve current activeConversationId — don't clobber an ongoing chat
-				const currentId = state.activeConversationId;
+				// Preserve already-loaded messages so the active chat doesn't blank out
+				const existingById = {};
+				for (const c of state.conversations) {
+					existingById[c.id] = c;
+				}
+				const mapped = (conversations || []).map((conversation) => {
+					const existing = existingById[conversation.name];
+					return {
+						id: conversation.name,
+						title: conversation.title || "New Conversation",
+						last_message: conversation.last_message || "",
+						timestamp: conversation.modified ? _relativeDate(conversation.modified) : "",
+						is_pinned: conversation.is_pinned,
+						// Keep loaded messages — don't wipe them on refresh
+						messages: existing ? existing.messages : [],
+					};
+				});
+				// Restore last active conversation from session, falling back to current state
+				const currentId = state.activeConversationId
+					|| sessionStorage.getItem(SESSION_KEY);
 				const stillExists = mapped.some((c) => c.id === currentId);
+				const restoredId = stillExists ? currentId : null;
 				setState({
 					type: "LOAD_CONVERSATIONS",
 					conversations: mapped,
-					activeConversationId: stillExists ? currentId : null,
+					activeConversationId: restoredId,
 				});
+				// Load messages for restored conversation if not already loaded
+				if (restoredId && !state.conversations.find((c) => c.id === restoredId)?.messages?.length) {
+					loadMessages(restoredId);
+				}
 			},
 		});
 	}

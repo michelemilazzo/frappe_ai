@@ -34,7 +34,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Provider",
-   "options": "Gemini\nOpenAI\nAnthropic\nGroq\nOllama",
+   "options": "Gemini\nOpenAI\nAnthropic\nGroq\nOllama\nGrok\nNvidia",
    "reqd": 1
   },
   {

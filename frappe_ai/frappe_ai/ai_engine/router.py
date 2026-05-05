@@ -8,6 +8,8 @@ PROVIDER_MAP = {
 	"Anthropic": "frappe_ai.frappe_ai.ai_engine.providers.anthropic_provider.AnthropicProvider",
 	"Groq": "frappe_ai.frappe_ai.ai_engine.providers.groq_provider.GroqProvider",
 	"Ollama": "frappe_ai.frappe_ai.ai_engine.providers.ollama_provider.OllamaProvider",
+	"Grok": "frappe_ai.frappe_ai.ai_engine.providers.grok_provider.GrokProvider",
+	"Nvidia": "frappe_ai.frappe_ai.ai_engine.providers.nvidia_provider.NvidiaProvider",
 }
 
 
