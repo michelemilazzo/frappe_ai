@@ -7,6 +7,9 @@ _READ_TOOL_MODULES = [
 	"frappe_ai.frappe_ai.ai_engine.agents.tools.get_user_context",
 	"frappe_ai.frappe_ai.ai_engine.agents.tools.list_doctypes",
 	"frappe_ai.frappe_ai.ai_engine.agents.tools.get_doctype_meta",
+	"frappe_ai.frappe_ai.ai_engine.agents.tools.navigate_ui",
+	"frappe_ai.frappe_ai.ai_engine.agents.tools.get_page_context",
+	"frappe_ai.frappe_ai.ai_engine.agents.tools.interact_ui",
 ]
 
 _WRITE_TOOL_MODULES = [

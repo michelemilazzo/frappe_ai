@@ -1,4 +1,24 @@
+import json
+
 import frappe
+
+_PAGE_CTX_TTL = 30  # seconds — context is only valid for the current request
+
+
+@frappe.whitelist()
+def push_page_context(context: str):
+	"""Store the client's current page context in Redis so get_page_context tool can read it."""
+	user = frappe.session.user
+	if not user or user == "Guest":
+		return {"status": "ignored"}
+	try:
+		# Validate it's parseable JSON before storing
+		parsed = json.loads(context) if isinstance(context, str) else context
+		cache_key = f"frappe_ai_page_ctx_{user}"
+		frappe.cache().set_value(cache_key, json.dumps(parsed), expires_in_sec=_PAGE_CTX_TTL)
+	except Exception:
+		pass
+	return {"status": "ok"}
 
 
 @frappe.whitelist()

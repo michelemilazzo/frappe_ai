@@ -20,6 +20,12 @@ def _get_client(api_key: str, base_url: str = ""):
 	return Groq(**kwargs)
 
 
+def _is_reasoning_model(model: str) -> bool:
+	"""Groq reasoning models (openai/* and deepseek-r1-* families) do not support tool use in streaming."""
+	m = (model or "").lower()
+	return m.startswith("openai/") or "deepseek-r1" in m or "qwq" in m
+
+
 def _wrap_groq_error(exc):
 	try:
 		from groq import APIStatusError, AuthenticationError, RateLimitError
@@ -88,14 +94,20 @@ class GroqProvider(BaseProvider):
 		try:
 			client = _get_client(self.api_key, self.api_base_url)
 			groq_messages = _build_messages(messages)
-			groq_tools = _build_tools(tools)
+			is_reasoning = _is_reasoning_model(self.model)
+			# Reasoning models do not support tool use
+			groq_tools = _build_tools(tools) if not is_reasoning else None
 
 			kwargs = {
 				"model": self.model,
 				"messages": groq_messages,
 				"max_completion_tokens": self.max_tokens,
-				"temperature": self.temperature,
 			}
+			if is_reasoning:
+				kwargs["reasoning_effort"] = "medium"
+			else:
+				kwargs["temperature"] = self.temperature
+
 			if groq_tools:
 				kwargs["tools"] = groq_tools
 				kwargs["tool_choice"] = "auto"
@@ -143,15 +155,21 @@ class GroqProvider(BaseProvider):
 		try:
 			client = _get_client(self.api_key, self.api_base_url)
 			groq_messages = _build_messages(messages)
-			groq_tools = _build_tools(tools)
+			is_reasoning = _is_reasoning_model(self.model)
+			# Reasoning models do not support tool use
+			groq_tools = _build_tools(tools) if not is_reasoning else None
 
 			kwargs = {
 				"model": self.model,
 				"messages": groq_messages,
 				"max_completion_tokens": self.max_tokens,
-				"temperature": self.temperature,
 				"stream": True,
 			}
+			if is_reasoning:
+				kwargs["reasoning_effort"] = "medium"
+			else:
+				kwargs["temperature"] = self.temperature
+
 			if groq_tools:
 				kwargs["tools"] = groq_tools
 				kwargs["tool_choice"] = "auto"
@@ -239,15 +257,18 @@ class GroqProvider(BaseProvider):
 		return max(1, total_chars // 4)
 
 	def supports_tools(self) -> bool:
-		return True
+		# Groq reasoning models (openai/*, deepseek-r1-*, qwq-*) do not support tool use
+		return not _is_reasoning_model(self.model)
 
 	def supports_vision(self) -> bool:
 		return False
 
 	def get_context_window(self) -> int:
-		# openai/gpt-oss-120b has an 8000 TPM cap on Groq's on-demand tier.
-		# Return a conservative input budget so the context builder never exceeds it.
-		return 6_000
+		# Reasoning models on Groq's on-demand tier have an 8000 TPM cap.
+		# Standard models (llama-3.3-70b-versatile etc.) have 128k context.
+		if _is_reasoning_model(self.model):
+			return 6_000
+		return 128_000
 
 
 def _safe_parse(s: str) -> dict:

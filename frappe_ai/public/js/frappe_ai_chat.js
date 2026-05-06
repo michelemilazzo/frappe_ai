@@ -1997,6 +1997,56 @@ let panelAnimation = null;
 			}
 			/* // ─── END CHANGE 2 ─── */
 
+			/* ─── AI Action Toast ─── */
+			.frappe-ai-action-toast {
+				align-items: center;
+				background: var(--card-bg, #fff);
+				border: 1px solid var(--border-color);
+				border-left: 3px solid var(--primary-color);
+				border-radius: 8px;
+				bottom: 88px;
+				box-shadow: 0 4px 20px rgba(0,0,0,.12);
+				color: var(--text-color);
+				display: inline-flex;
+				font-family: var(--font-stack);
+				font-size: var(--font-size-sm);
+				gap: 8px;
+				left: 50%;
+				max-width: 340px;
+				opacity: 0;
+				padding: 9px 14px;
+				pointer-events: none;
+				position: fixed;
+				transform: translateX(-50%) translateY(8px);
+				transition: opacity 180ms ease, transform 180ms ease;
+				white-space: nowrap;
+				z-index: 99999;
+			}
+
+			.frappe-ai-action-toast.is-visible {
+				opacity: 1;
+				transform: translateX(-50%) translateY(0);
+			}
+
+			.frappe-ai-action-toast-icon {
+				color: var(--primary-color);
+				display: flex;
+				flex: 0 0 16px;
+				height: 16px;
+				width: 16px;
+			}
+
+			.frappe-ai-action-toast-icon svg {
+				height: 16px;
+				width: 16px;
+			}
+
+			.frappe-ai-action-toast-text {
+				overflow: hidden;
+				text-overflow: ellipsis;
+			}
+			/* ─── End AI Action Toast ─── */
+
 			@media (max-width: 768px) {
 				.frappe-ai-panel {
 					bottom: 80px;
@@ -2467,6 +2517,9 @@ let panelAnimation = null;
 		const userMessage = createMessage("user", prompt);
 		resetComposer();
 
+		// Push current page context to cache before streaming so get_page_context tool can read it
+		_pushPageContext();
+
 		const existingId = getActiveConversationId();
 
 		if (existingId) {
@@ -2499,6 +2552,75 @@ let panelAnimation = null;
 				},
 			});
 		}
+	}
+
+	function _pushPageContext() {
+		try {
+			const ctx = _gatherPageContext();
+			frappe.call({
+				method: "frappe_ai.frappe_ai.api.settings.push_page_context",
+				args: { context: JSON.stringify(ctx) },
+				// fire-and-forget — no callback needed
+			});
+		} catch (e) {
+			// non-fatal
+		}
+	}
+
+	function _gatherPageContext() {
+		const route = frappe.get_route ? frappe.get_route() : [];
+		const pageType = route[0] || "";
+		const ctx = {
+			route: route.join("/"),
+			page_type: pageType.toLowerCase(),
+		};
+
+		// Form context
+		if (window.cur_frm && cur_frm.doc) {
+			const frm = cur_frm;
+			ctx.doctype = frm.doctype;
+			ctx.docname = frm.docname;
+			ctx.is_new = Boolean(frm.is_new());
+			ctx.is_dirty = Boolean(frm.is_dirty());
+			ctx.docstatus = frm.doc.docstatus;
+
+			// Collect visible non-password field values (capped at 40 fields)
+			const fieldValues = {};
+			let count = 0;
+			for (const field of (frm.meta && frm.meta.fields || [])) {
+				if (count >= 40) break;
+				if (["password", "Section Break", "Column Break", "Tab Break", "HTML"].includes(field.fieldtype)) continue;
+				const val = frm.doc[field.fieldname];
+				if (val !== undefined && val !== null && val !== "") {
+					fieldValues[field.fieldname] = val;
+					count++;
+				}
+			}
+			ctx.field_values = fieldValues;
+
+			// Custom buttons present on this form
+			const customButtons = [];
+			if (frm.custom_buttons) {
+				for (const label of Object.keys(frm.custom_buttons)) {
+					customButtons.push(label);
+				}
+			}
+			ctx.custom_buttons = customButtons;
+		}
+
+		// List context
+		if (window.cur_list) {
+			ctx.list_doctype = cur_list.doctype;
+			ctx.list_filters = cur_list.get_filters ? cur_list.get_filters() : [];
+			ctx.list_total = cur_list.total_count;
+		}
+
+		// Report context
+		if (pageType === "query-report" && window.frappe && frappe.query_report) {
+			ctx.report_name = frappe.query_report.report_name;
+		}
+
+		return ctx;
 	}
 
 	function trapFocus(event) {
@@ -2815,9 +2937,282 @@ let panelAnimation = null;
 				});
 			}
 
+		} else if (eventType === "ui_action") {
+			_executeUiAction(data);
+
 		} else if (eventType === "error") {
 			frappe?.show_alert?.({ message: data.message || "An error occurred.", indicator: "red" }, 5);
 		}
+	}
+
+	// ─── UI ACTION EXECUTOR (navigation + interaction) ────────────────────────
+	function _executeUiAction(payload) {
+		if (!payload || !payload.action) return;
+		const { action } = payload;
+
+		// Navigation actions
+		if (["list", "form", "new_form", "report", "workspace"].includes(action)) {
+			_executeNavAction(payload);
+			return;
+		}
+
+		// Interaction actions
+		_executeInteractAction(payload);
+	}
+
+	function _executeNavAction(payload) {
+		const { action, doctype, name, report_name, workspace, filters, defaults } = payload;
+		try {
+			if (action === "list") {
+				if (filters && Object.keys(filters).length) {
+					frappe.route_options = Object.assign({}, frappe.route_options || {}, filters);
+				}
+				frappe.set_route("List", doctype, "List");
+
+			} else if (action === "form") {
+				frappe.set_route("Form", doctype, name);
+
+			} else if (action === "new_form") {
+				if (defaults && Object.keys(defaults).length) {
+					frappe.route_options = Object.assign({}, frappe.route_options || {}, defaults);
+				}
+				frappe.new_doc(doctype);
+
+			} else if (action === "report") {
+				frappe.set_route("query-report", report_name, filters || {});
+
+			} else if (action === "workspace") {
+				frappe.set_route(workspace);
+			}
+		} catch (err) {
+			console.warn("[frappe_ai] nav action error:", err);
+		}
+	}
+
+	function _executeInteractAction(payload) {
+		const { action } = payload;
+		_showAiActionToast(_interactLabel(payload));
+
+		try {
+			if (action === "save_form") {
+				_doSaveForm();
+
+			} else if (action === "submit_document") {
+				_doSubmitDocument();
+
+			} else if (action === "cancel_document") {
+				_doCancelDocument(payload.confirm);
+
+			} else if (action === "amend_document") {
+				_doAmendDocument();
+
+			} else if (action === "delete_document") {
+				_doDeleteDocument(payload.confirm);
+
+			} else if (action === "new_document") {
+				const dt = payload.doctype || (cur_frm && cur_frm.doctype);
+				if (dt) frappe.new_doc(dt);
+
+			} else if (action === "set_field_value") {
+				_doSetFieldValue(payload.fieldname, payload.value);
+
+			} else if (action === "click_button") {
+				_doClickButton(payload.button_label);
+
+			} else if (action === "trigger_form_action") {
+				_doClickButton(payload.button_label);
+
+			} else if (action === "click_list_action") {
+				_doClickListAction(payload.list_action);
+
+			} else if (action === "open_quick_entry") {
+				frappe.ui.QuickEntryForm && new frappe.ui.QuickEntryForm(payload.doctype, null, null, true);
+
+			} else if (action === "scroll_to_field") {
+				_doScrollToField(payload.fieldname);
+			}
+		} catch (err) {
+			console.warn("[frappe_ai] interact action error:", err);
+		}
+	}
+
+	function _doSaveForm() {
+		if (cur_frm && cur_frm.save) {
+			cur_frm.save("Save");
+		}
+	}
+
+	function _doSubmitDocument() {
+		if (cur_frm && cur_frm.savesubmit) {
+			cur_frm.savesubmit();
+		}
+	}
+
+	function _doCancelDocument(autoConfirm) {
+		if (!cur_frm) return;
+		if (autoConfirm) {
+			cur_frm.savecancel();
+		} else {
+			frappe.confirm("Cancel this document? This cannot be undone.", () => cur_frm.savecancel());
+		}
+	}
+
+	function _doAmendDocument() {
+		if (cur_frm && cur_frm.amend_doc) {
+			cur_frm.amend_doc();
+		}
+	}
+
+	function _doDeleteDocument(autoConfirm) {
+		if (!cur_frm) return;
+		const doctype = cur_frm.doctype;
+		const docname = cur_frm.docname;
+		if (!doctype || !docname) return;
+		const doDelete = () => {
+			frappe.call({
+				method: "frappe.client.delete",
+				args: { doctype, name: docname },
+				callback() {
+					frappe.show_alert({ message: `${docname} deleted.`, indicator: "green" }, 3);
+					frappe.set_route("List", doctype, "List");
+				},
+			});
+		};
+		if (autoConfirm) {
+			doDelete();
+		} else {
+			frappe.confirm(`Delete <b>${frappe.utils.escape_html(docname)}</b>? This cannot be undone.`, doDelete);
+		}
+	}
+
+	function _doSetFieldValue(fieldname, value) {
+		if (!cur_frm || !fieldname) return;
+		cur_frm.set_value(fieldname, value);
+	}
+
+	function _doClickButton(label) {
+		if (!label) return;
+		const lc = label.toLowerCase().trim();
+
+		// 1. Try form custom buttons
+		if (cur_frm) {
+			// Primary action buttons in the toolbar
+			const customBtn = cur_frm.page && cur_frm.page.btn_primary;
+			if (customBtn && customBtn.text().toLowerCase().trim() === lc) {
+				customBtn.trigger("click");
+				return;
+			}
+
+			// Custom action buttons (frappe.ui.form.on custom buttons)
+			if (cur_frm.custom_buttons) {
+				for (const [btnLabel, btn] of Object.entries(cur_frm.custom_buttons)) {
+					if (btnLabel.toLowerCase().trim() === lc) {
+						btn.trigger("click");
+						return;
+					}
+				}
+			}
+
+			// Form action menu items
+			if (cur_frm.page) {
+				const menuItems = cur_frm.page.inner_toolbar
+					? cur_frm.page.inner_toolbar.find(".btn-action")
+					: [];
+				for (const el of menuItems) {
+					if ((el.textContent || "").toLowerCase().trim() === lc) {
+						el.click();
+						return;
+					}
+				}
+			}
+		}
+
+		// 2. Fallback: scan all visible buttons on the page
+		const allButtons = document.querySelectorAll(
+			'.page-head button, .frappe-toolbar button, .form-footer button, .btn'
+		);
+		for (const btn of allButtons) {
+			const text = (btn.textContent || btn.getAttribute("data-label") || "").toLowerCase().trim();
+			if (text === lc && btn.offsetParent !== null && !btn.disabled) {
+				btn.click();
+				return;
+			}
+		}
+
+		frappe.show_alert({ message: `Button "${label}" not found on this page.`, indicator: "orange" }, 4);
+	}
+
+	function _doClickListAction(listAction) {
+		if (!listAction || !cur_list) return;
+		const lc = listAction.toLowerCase().trim();
+		// Frappe list toolbar actions
+		if (cur_list.page) {
+			const actionBtns = cur_list.page.inner_toolbar
+				? cur_list.page.inner_toolbar.find(".btn, .dropdown-item")
+				: [];
+			for (const el of actionBtns) {
+				if ((el.textContent || "").toLowerCase().trim() === lc) {
+					el.click();
+					return;
+				}
+			}
+		}
+		// Fallback: scan list header area
+		const listBtns = document.querySelectorAll('.list-toolbar button, .list-header button');
+		for (const btn of listBtns) {
+			if ((btn.textContent || "").toLowerCase().trim() === lc && btn.offsetParent !== null) {
+				btn.click();
+				return;
+			}
+		}
+		frappe.show_alert({ message: `List action "${listAction}" not found.`, indicator: "orange" }, 4);
+	}
+
+	function _doScrollToField(fieldname) {
+		if (!cur_frm || !fieldname) return;
+		const field = cur_frm.get_field(fieldname);
+		if (field && field.wrapper) {
+			field.wrapper.scrollIntoView({ behavior: "smooth", block: "center" });
+		}
+	}
+
+	function _interactLabel(payload) {
+		const { action, button_label, fieldname, value, list_action, doctype } = payload;
+		if (action === "click_button" || action === "trigger_form_action") return `Clicking "${button_label}"`;
+		if (action === "set_field_value") return `Setting ${fieldname} → ${value}`;
+		if (action === "save_form") return "Saving form";
+		if (action === "submit_document") return "Submitting document";
+		if (action === "cancel_document") return "Cancelling document";
+		if (action === "amend_document") return "Amending document";
+		if (action === "delete_document") return "Deleting document";
+		if (action === "new_document") return `New ${doctype || "document"}`;
+		if (action === "click_list_action") return `List action: ${list_action}`;
+		if (action === "open_quick_entry") return `Quick entry: ${doctype}`;
+		if (action === "scroll_to_field") return `Scrolling to ${fieldname}`;
+		return action;
+	}
+
+	// ─── AI ACTION TOAST ─────────────────────────────────────────────────────
+	let _toastTimeout = null;
+
+	function _showAiActionToast(text) {
+		let toast = document.getElementById("frappe-ai-action-toast");
+		if (!toast) {
+			toast = document.createElement("div");
+			toast.id = "frappe-ai-action-toast";
+			toast.className = "frappe-ai-action-toast";
+			document.body.appendChild(toast);
+		}
+		toast.innerHTML = `
+			<span class="frappe-ai-action-toast-icon">${getIcon("brain")}</span>
+			<span class="frappe-ai-action-toast-text">${escapeHtml(text)}</span>
+		`;
+		toast.classList.add("is-visible");
+		if (_toastTimeout) clearTimeout(_toastTimeout);
+		_toastTimeout = setTimeout(() => {
+			toast.classList.remove("is-visible");
+			_toastTimeout = null;
+		}, 2800);
 	}
 
 	function _finishStream(conversationId) {

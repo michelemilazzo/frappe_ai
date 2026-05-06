@@ -209,6 +209,9 @@ def _generate_stream(
 			elif event_type == "tool_result":
 				yield _sse("tool_result", {"tool": data.get("tool", ""), "result": data.get("result", {})})
 
+			elif event_type == "ui_action":
+				yield _sse("ui_action", data)
+
 			elif event_type == "done":
 				usage = data.get("usage", {})
 				final_usage["input_tokens"] = usage.get("input", 0)

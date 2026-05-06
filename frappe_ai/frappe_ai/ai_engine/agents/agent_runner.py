@@ -42,7 +42,7 @@ def run(messages: list, provider, user: str, stream: bool = False, on_event=None
 	tools = get_tools_for_llm(user) if provider.supports_tools() else []
 
 	if not stream:
-		return _run_sync(messages, provider, user, tools)
+		return _run_sync(messages, provider, user, tools, on_event)
 
 	return _run_stream(messages, provider, user, tools, on_event)
 
@@ -70,7 +70,7 @@ def _check_budget(user: str):
 		raise ProviderError(_BUDGET_EXCEEDED_MSG)
 
 
-def _run_sync(messages: list, provider, user: str, tools: list) -> dict:
+def _run_sync(messages: list, provider, user: str, tools: list, on_event=None) -> dict:
 	current_messages = list(messages)
 
 	for _iteration in range(MAX_TOOL_ITERATIONS):
@@ -96,6 +96,7 @@ def _run_sync(messages: list, provider, user: str, tools: list) -> dict:
 				args = {}
 
 			result = _execute_tool(fn_name, args, user)
+			_maybe_emit_ui_action(result, on_event)
 			current_messages.append(
 				{
 					"role": "tool",
@@ -186,6 +187,8 @@ def _run_stream(messages: list, provider, user: str, tools: list, on_event):
 			if on_event:
 				on_event({"event": "tool_result", "data": {"tool": fn_name, "result": result}})
 
+			_maybe_emit_ui_action(result, on_event)
+
 			current_messages.append(
 				{
 					"role": "tool",
@@ -214,3 +217,9 @@ def _execute_tool(name: str, args: dict, user: str) -> dict:
 	except Exception as exc:
 		frappe.log_error(frappe.get_traceback(), f"Tool execution error: {name}")
 		return {"error": str(exc)}
+
+
+def _maybe_emit_ui_action(result: dict, on_event) -> None:
+	"""If a tool result carries a ui_action payload, emit it as a dedicated SSE event."""
+	if on_event and isinstance(result, dict) and "ui_action" in result:
+		on_event({"event": "ui_action", "data": result["ui_action"]})
