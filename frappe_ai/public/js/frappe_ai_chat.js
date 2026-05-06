@@ -2569,13 +2569,13 @@ let panelAnimation = null;
 
 	function _gatherPageContext() {
 		const route = frappe.get_route ? frappe.get_route() : [];
-		const pageType = route[0] || "";
+		const pageType = (route[0] || "").toLowerCase();
 		const ctx = {
 			route: route.join("/"),
-			page_type: pageType.toLowerCase(),
+			page_type: pageType,
 		};
 
-		// Form context
+		// ── Form context ──────────────────────────────────────────────────────
 		if (window.cur_frm && cur_frm.doc) {
 			const frm = cur_frm;
 			ctx.doctype = frm.doctype;
@@ -2584,12 +2584,13 @@ let panelAnimation = null;
 			ctx.is_dirty = Boolean(frm.is_dirty());
 			ctx.docstatus = frm.doc.docstatus;
 
-			// Collect visible non-password field values (capped at 40 fields)
+			// Field values (skip layout, password, HTML; cap at 50)
+			const SKIP_FT = new Set(["password", "Section Break", "Column Break", "Tab Break", "HTML", "Heading", "Button"]);
 			const fieldValues = {};
 			let count = 0;
 			for (const field of (frm.meta && frm.meta.fields || [])) {
-				if (count >= 40) break;
-				if (["password", "Section Break", "Column Break", "Tab Break", "HTML"].includes(field.fieldtype)) continue;
+				if (count >= 50) break;
+				if (SKIP_FT.has(field.fieldtype)) continue;
 				const val = frm.doc[field.fieldname];
 				if (val !== undefined && val !== null && val !== "") {
 					fieldValues[field.fieldname] = val;
@@ -2598,27 +2599,152 @@ let panelAnimation = null;
 			}
 			ctx.field_values = fieldValues;
 
-			// Custom buttons present on this form
-			const customButtons = [];
-			if (frm.custom_buttons) {
-				for (const label of Object.keys(frm.custom_buttons)) {
-					customButtons.push(label);
+			// All field definitions (name + type + label) — needed for AI to know valid fieldnames
+			ctx.fields = (frm.meta && frm.meta.fields || [])
+				.filter(f => !SKIP_FT.has(f.fieldtype))
+				.map(f => ({ fieldname: f.fieldname, label: f.label, fieldtype: f.fieldtype, options: f.options }));
+
+			// Child tables present on this form
+			const childTables = (frm.meta && frm.meta.fields || [])
+				.filter(f => f.fieldtype === "Table")
+				.map(f => ({
+					fieldname: f.fieldname,
+					label: f.label,
+					row_count: (frm.doc[f.fieldname] || []).length,
+				}));
+			ctx.child_tables = childTables;
+
+			// Custom / action buttons
+			const customButtons = frm.custom_buttons ? Object.keys(frm.custom_buttons) : [];
+			ctx.custom_buttons = customButtons;
+
+			// Sections and tabs
+			const sections = [];
+			for (const f of (frm.meta && frm.meta.fields || [])) {
+				if (f.fieldtype === "Section Break" || f.fieldtype === "Tab Break") {
+					if (f.label) sections.push({ type: f.fieldtype, label: f.label, fieldname: f.fieldname });
 				}
 			}
-			ctx.custom_buttons = customButtons;
+			ctx.sections = sections;
 		}
 
-		// List context
+		// ── List context ──────────────────────────────────────────────────────
 		if (window.cur_list) {
 			ctx.list_doctype = cur_list.doctype;
-			ctx.list_filters = cur_list.get_filters ? cur_list.get_filters() : [];
+
+			// Collect active filters from multiple sources
+			const activeFilters = [];
+			try {
+				// 1. filter_area (the standard Frappe filter bar — most reliable)
+				if (cur_list.filter_area && cur_list.filter_area.filter_list) {
+					for (const f of (cur_list.filter_area.filter_list.filters || [])) {
+						if (f.fieldname) {
+							activeFilters.push({
+								fieldname: f.fieldname,
+								operator: f.operator || "=",
+								value: f.get_value ? f.get_value() : f.value,
+							});
+						}
+					}
+				}
+				// 2. cur_list.get_filters() — may include route/URL-injected filters
+				if (!activeFilters.length && cur_list.get_filters) {
+					const gf = cur_list.get_filters();
+					if (Array.isArray(gf)) {
+						for (const f of gf) {
+							// format: [doctype, fieldname, operator, value]
+							if (Array.isArray(f) && f.length >= 4) {
+								activeFilters.push({ fieldname: f[1], operator: f[2], value: f[3] });
+							} else if (f && typeof f === "object" && f.fieldname) {
+								activeFilters.push({ fieldname: f.fieldname, operator: f.operator || "=", value: f.value });
+							}
+						}
+					}
+				}
+				// 3. cur_list.filters (legacy array of [doctype, field, op, val])
+				if (!activeFilters.length && Array.isArray(cur_list.filters)) {
+					for (const f of cur_list.filters) {
+						if (Array.isArray(f) && f.length >= 4) {
+							activeFilters.push({ fieldname: f[1], operator: f[2], value: f[3] });
+						}
+					}
+				}
+				// 4. URL params — frappe_route_options / frappe.route_options may carry them
+				//    Also parse from window.location.search as last resort
+				if (!activeFilters.length) {
+					try {
+						const params = new URLSearchParams(window.location.search);
+						params.forEach((val, key) => {
+							if (key !== "cmd" && key !== "_") {
+								activeFilters.push({ fieldname: key, operator: "=", value: val });
+							}
+						});
+					} catch (_) {}
+				}
+			} catch (_) {}
+
+			ctx.list_filters = activeFilters;
+			ctx.list_has_filters = activeFilters.length > 0;
 			ctx.list_total = cur_list.total_count;
+
+			// Available columns (for filter fieldname hints)
+			try {
+				ctx.list_columns = (cur_list.columns || []).map(c => ({
+					fieldname: c.fieldname || (c.df && c.df.fieldname),
+					label: c.df && c.df.label,
+				})).filter(c => c.fieldname);
+			} catch (_) { ctx.list_columns = []; }
 		}
 
-		// Report context
+		// ── Report context ────────────────────────────────────────────────────
 		if (pageType === "query-report" && window.frappe && frappe.query_report) {
 			ctx.report_name = frappe.query_report.report_name;
+			// Report filter fields with current values
+			try {
+				const filters = [];
+				for (const f of (frappe.query_report.filters || [])) {
+					filters.push({
+						fieldname: f.df && f.df.fieldname,
+						label: f.df && f.df.label,
+						fieldtype: f.df && f.df.fieldtype,
+						value: f.get_value ? f.get_value() : null,
+					});
+				}
+				ctx.report_filters = filters;
+			} catch (_) { ctx.report_filters = []; }
 		}
+
+		// ── Open dialog ───────────────────────────────────────────────────────
+		try {
+			const openDialog = frappe.ui && frappe.ui.Dialog && frappe._cur_dialog;
+			if (openDialog && openDialog.display) {
+				ctx.open_dialog = {
+					title: openDialog.title || "",
+					buttons: (openDialog.get_primary_btn ? [openDialog.get_primary_btn().text()] : []),
+				};
+			}
+		} catch (_) {}
+
+		// ── Custom/module pages — generic input scan ──────────────────────────
+		// Capture any labelled inputs visible on the main content area
+		try {
+			const inputs = [];
+			document.querySelectorAll(".page-content input:not([type=hidden]), .page-content select, .page-content textarea").forEach(el => {
+				if (!el.offsetParent) return; // hidden
+				const id = el.id || el.name || "";
+				const lblEl = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
+				const lbl = lblEl ? lblEl.textContent.trim() : (el.placeholder || el.getAttribute("aria-label") || "");
+				if (lbl || id) {
+					inputs.push({ tag: el.tagName.toLowerCase(), id, label: lbl, type: el.type || "" });
+				}
+			});
+			if (inputs.length) ctx.page_inputs = inputs.slice(0, 30);
+		} catch (_) {}
+
+		// ── Available Frappe pages (for fuzzy navigation) ─────────────────────
+		try {
+			if (frappe.pages) ctx.available_pages = Object.keys(frappe.pages).slice(0, 100);
+		} catch (_) {}
 
 		return ctx;
 	}
@@ -2960,8 +3086,40 @@ let panelAnimation = null;
 		_executeInteractAction(payload);
 	}
 
+	// ── Fuzzy string matching (client-side) ──────────────────────────────────
+	function _fuzzyScore(query, candidate) {
+		if (!query || !candidate) return 0;
+		const q = query.toLowerCase().trim().replace(/[-_]/g, " ");
+		const c = candidate.toLowerCase().trim().replace(/[-_]/g, " ");
+		if (q === c) return 1.0;
+		if (c.includes(q)) return 0.85;
+		if (q.includes(c)) return 0.75;
+		// Token Jaccard
+		const qt = new Set(q.match(/[a-z0-9]+/g) || []);
+		const ct = new Set(c.match(/[a-z0-9]+/g) || []);
+		if (!qt.size || !ct.size) return 0;
+		let inter = 0;
+		for (const t of qt) if (ct.has(t)) inter++;
+		const union = qt.size + ct.size - inter;
+		const jaccard = inter / union;
+		// Acronym bonus: "pms" matches "project management system"
+		const acro = [...ct].map(([f]) => f).join("") || "";
+		const acroBon = (acro === q.replace(/\s/g, "")) ? 0.6 : 0;
+		return Math.max(jaccard, acroBon);
+	}
+
+	function _fuzzyBest(query, candidates, threshold = 0.25) {
+		if (!query || !candidates || !candidates.length) return null;
+		let best = null, bestScore = -1;
+		for (const c of candidates) {
+			const s = _fuzzyScore(query, typeof c === "string" ? c : c.label || c.fieldname || c.name || "");
+			if (s > bestScore) { bestScore = s; best = c; }
+		}
+		return bestScore >= threshold ? best : null;
+	}
+
 	function _executeNavAction(payload) {
-		const { action, doctype, name, report_name, workspace, filters, defaults } = payload;
+		const { action, doctype, name, report_name, workspace, page, filters, defaults } = payload;
 		try {
 			if (action === "list") {
 				if (filters && Object.keys(filters).length) {
@@ -2983,6 +3141,17 @@ let panelAnimation = null;
 
 			} else if (action === "workspace") {
 				frappe.set_route(workspace);
+
+			} else if (action === "page") {
+				// Custom Frappe page — slug already resolved server-side
+				if (frappe.pages && frappe.pages[page]) {
+					frappe.set_route(page);
+				} else {
+					// Fallback: fuzzy-search known pages in frappe.pages
+					const pageKeys = Object.keys(frappe.pages || {});
+					const match = _fuzzyBest(page, pageKeys);
+					frappe.set_route(match || page);
+				}
 			}
 		} catch (err) {
 			console.warn("[frappe_ai] nav action error:", err);
@@ -2994,17 +3163,20 @@ let panelAnimation = null;
 		_showAiActionToast(_interactLabel(payload));
 
 		try {
+			// ── Form document actions ──────────────────────────────────────────
 			if (action === "save_form") {
-				_doSaveForm();
+				if (cur_frm) cur_frm.save("Save");
 
 			} else if (action === "submit_document") {
-				_doSubmitDocument();
+				if (cur_frm) cur_frm.savesubmit();
 
 			} else if (action === "cancel_document") {
-				_doCancelDocument(payload.confirm);
+				if (!cur_frm) return;
+				const doIt = () => cur_frm.savecancel();
+				payload.confirm ? doIt() : frappe.confirm("Cancel this document?", doIt);
 
 			} else if (action === "amend_document") {
-				_doAmendDocument();
+				if (cur_frm && cur_frm.amend_doc) cur_frm.amend_doc();
 
 			} else if (action === "delete_document") {
 				_doDeleteDocument(payload.confirm);
@@ -3013,182 +3185,580 @@ let panelAnimation = null;
 				const dt = payload.doctype || (cur_frm && cur_frm.doctype);
 				if (dt) frappe.new_doc(dt);
 
+			// ── Form field actions ─────────────────────────────────────────────
 			} else if (action === "set_field_value") {
-				_doSetFieldValue(payload.fieldname, payload.value);
+				if (cur_frm && payload.fieldname) {
+					const fn = _resolveFormFieldname(payload.fieldname);
+					cur_frm.set_value(fn, payload.value);
+				}
 
+			} else if (action === "scroll_to_field") {
+				_doScrollToField(_resolveFormFieldname(payload.fieldname));
+
+			} else if (action === "expand_section") {
+				_doExpandSection(payload.section_label);
+
+			// ── Child table ────────────────────────────────────────────────────
+			} else if (action === "add_child_row") {
+				if (cur_frm && payload.table_fieldname) {
+					cur_frm.add_child(payload.table_fieldname);
+					cur_frm.refresh_field(payload.table_fieldname);
+				}
+
+			} else if (action === "set_child_row_value") {
+				_doSetChildRowValue(payload.table_fieldname, payload.row_index, payload.fieldname, payload.value);
+
+			} else if (action === "delete_child_row") {
+				_doDeleteChildRow(payload.table_fieldname, payload.row_index);
+
+			// ── Generic click / type ───────────────────────────────────────────
 			} else if (action === "click_button") {
 				_doClickButton(payload.button_label);
 
-			} else if (action === "trigger_form_action") {
-				_doClickButton(payload.button_label);
+			} else if (action === "click_element") {
+				_doClickElement(payload.selector, payload.text);
+
+			} else if (action === "type_in_element") {
+				_doTypeInElement(payload.selector, payload.label, payload.text);
+
+			// ── List view ──────────────────────────────────────────────────────
+			} else if (action === "add_list_filter") {
+				_doAddListFilter(payload.fieldname, payload.operator, payload.value);
+
+			} else if (action === "remove_list_filter") {
+				_doRemoveListFilter(payload.fieldname);
+
+			} else if (action === "clear_list_filters") {
+				_doClearListFilters();
 
 			} else if (action === "click_list_action") {
 				_doClickListAction(payload.list_action);
 
-			} else if (action === "open_quick_entry") {
-				frappe.ui.QuickEntryForm && new frappe.ui.QuickEntryForm(payload.doctype, null, null, true);
+			} else if (action === "select_list_rows") {
+				_doSelectListRows(payload.select_all, payload.names);
 
-			} else if (action === "scroll_to_field") {
-				_doScrollToField(payload.fieldname);
+			// ── Report ─────────────────────────────────────────────────────────
+			} else if (action === "set_report_filter") {
+				_doSetReportFilter(payload.filter_label, payload.value);
+
+			} else if (action === "run_report") {
+				_doRunReport();
+
+			// ── Dialog ─────────────────────────────────────────────────────────
+			} else if (action === "open_quick_entry") {
+				if (frappe.ui.QuickEntryForm) new frappe.ui.QuickEntryForm(payload.doctype, null, null, true);
+
+			} else if (action === "open_dialog_action") {
+				_doDialogButtonClick(payload.button_label);
+
+			} else if (action === "close_dialog") {
+				_doCloseDialog();
 			}
 		} catch (err) {
-			console.warn("[frappe_ai] interact action error:", err);
+			console.warn("[frappe_ai] interact error:", err);
+			frappe.show_alert({ message: `Action failed: ${err.message}`, indicator: "orange" }, 4);
 		}
 	}
 
-	function _doSaveForm() {
-		if (cur_frm && cur_frm.save) {
-			cur_frm.save("Save");
-		}
-	}
-
-	function _doSubmitDocument() {
-		if (cur_frm && cur_frm.savesubmit) {
-			cur_frm.savesubmit();
-		}
-	}
-
-	function _doCancelDocument(autoConfirm) {
-		if (!cur_frm) return;
-		if (autoConfirm) {
-			cur_frm.savecancel();
-		} else {
-			frappe.confirm("Cancel this document? This cannot be undone.", () => cur_frm.savecancel());
-		}
-	}
-
-	function _doAmendDocument() {
-		if (cur_frm && cur_frm.amend_doc) {
-			cur_frm.amend_doc();
-		}
-	}
-
+	// ── Form helpers ──────────────────────────────────────────────────────────
 	function _doDeleteDocument(autoConfirm) {
 		if (!cur_frm) return;
-		const doctype = cur_frm.doctype;
-		const docname = cur_frm.docname;
+		const doctype = cur_frm.doctype, docname = cur_frm.docname;
 		if (!doctype || !docname) return;
-		const doDelete = () => {
-			frappe.call({
-				method: "frappe.client.delete",
-				args: { doctype, name: docname },
-				callback() {
-					frappe.show_alert({ message: `${docname} deleted.`, indicator: "green" }, 3);
-					frappe.set_route("List", doctype, "List");
-				},
-			});
-		};
-		if (autoConfirm) {
-			doDelete();
-		} else {
-			frappe.confirm(`Delete <b>${frappe.utils.escape_html(docname)}</b>? This cannot be undone.`, doDelete);
-		}
-	}
-
-	function _doSetFieldValue(fieldname, value) {
-		if (!cur_frm || !fieldname) return;
-		cur_frm.set_value(fieldname, value);
-	}
-
-	function _doClickButton(label) {
-		if (!label) return;
-		const lc = label.toLowerCase().trim();
-
-		// 1. Try form custom buttons
-		if (cur_frm) {
-			// Primary action buttons in the toolbar
-			const customBtn = cur_frm.page && cur_frm.page.btn_primary;
-			if (customBtn && customBtn.text().toLowerCase().trim() === lc) {
-				customBtn.trigger("click");
-				return;
-			}
-
-			// Custom action buttons (frappe.ui.form.on custom buttons)
-			if (cur_frm.custom_buttons) {
-				for (const [btnLabel, btn] of Object.entries(cur_frm.custom_buttons)) {
-					if (btnLabel.toLowerCase().trim() === lc) {
-						btn.trigger("click");
-						return;
-					}
-				}
-			}
-
-			// Form action menu items
-			if (cur_frm.page) {
-				const menuItems = cur_frm.page.inner_toolbar
-					? cur_frm.page.inner_toolbar.find(".btn-action")
-					: [];
-				for (const el of menuItems) {
-					if ((el.textContent || "").toLowerCase().trim() === lc) {
-						el.click();
-						return;
-					}
-				}
-			}
-		}
-
-		// 2. Fallback: scan all visible buttons on the page
-		const allButtons = document.querySelectorAll(
-			'.page-head button, .frappe-toolbar button, .form-footer button, .btn'
-		);
-		for (const btn of allButtons) {
-			const text = (btn.textContent || btn.getAttribute("data-label") || "").toLowerCase().trim();
-			if (text === lc && btn.offsetParent !== null && !btn.disabled) {
-				btn.click();
-				return;
-			}
-		}
-
-		frappe.show_alert({ message: `Button "${label}" not found on this page.`, indicator: "orange" }, 4);
-	}
-
-	function _doClickListAction(listAction) {
-		if (!listAction || !cur_list) return;
-		const lc = listAction.toLowerCase().trim();
-		// Frappe list toolbar actions
-		if (cur_list.page) {
-			const actionBtns = cur_list.page.inner_toolbar
-				? cur_list.page.inner_toolbar.find(".btn, .dropdown-item")
-				: [];
-			for (const el of actionBtns) {
-				if ((el.textContent || "").toLowerCase().trim() === lc) {
-					el.click();
-					return;
-				}
-			}
-		}
-		// Fallback: scan list header area
-		const listBtns = document.querySelectorAll('.list-toolbar button, .list-header button');
-		for (const btn of listBtns) {
-			if ((btn.textContent || "").toLowerCase().trim() === lc && btn.offsetParent !== null) {
-				btn.click();
-				return;
-			}
-		}
-		frappe.show_alert({ message: `List action "${listAction}" not found.`, indicator: "orange" }, 4);
+		const doDelete = () => frappe.call({
+			method: "frappe.client.delete",
+			args: { doctype, name: docname },
+			callback() {
+				frappe.show_alert({ message: `${docname} deleted.`, indicator: "green" }, 3);
+				frappe.set_route("List", doctype, "List");
+			},
+		});
+		autoConfirm ? doDelete()
+			: frappe.confirm(`Delete <b>${frappe.utils.escape_html(docname)}</b>? This cannot be undone.`, doDelete);
 	}
 
 	function _doScrollToField(fieldname) {
 		if (!cur_frm || !fieldname) return;
 		const field = cur_frm.get_field(fieldname);
-		if (field && field.wrapper) {
-			field.wrapper.scrollIntoView({ behavior: "smooth", block: "center" });
+		if (field && field.wrapper) field.wrapper.scrollIntoView({ behavior: "smooth", block: "center" });
+	}
+
+	function _doExpandSection(sectionLabel) {
+		if (!sectionLabel) return;
+		const lc = sectionLabel.toLowerCase();
+
+		// 1. Frappe form sections — exact then fuzzy
+		if (cur_frm && cur_frm.layout) {
+			const sections = cur_frm.layout.sections || [];
+			const sectionLabels = sections.map(s => (s.df && s.df.label) || "").filter(Boolean);
+			// Exact match first
+			let target = sections.find(s => (s.df && s.df.label || "").toLowerCase() === lc);
+			// Fuzzy fallback
+			if (!target) {
+				const bestLbl = _fuzzyBest(lc, sectionLabels);
+				if (bestLbl) target = sections.find(s => (s.df && s.df.label) === bestLbl);
+			}
+			if (target) {
+				if (target.collapsed) target.collapse(false);
+				if (target.wrapper) target.wrapper.scrollIntoView({ behavior: "smooth", block: "start" });
+				return;
+			}
+		}
+
+		// 2. Tabs — exact then fuzzy
+		if (cur_frm && cur_frm.page) {
+			const tabs = Array.from(cur_frm.page.wrapper ? cur_frm.page.wrapper.querySelectorAll(".nav-link, .tab-link") : []);
+			let target = tabs.find(t => (t.textContent || "").toLowerCase().trim() === lc);
+			if (!target) {
+				const tabLabels = tabs.map(t => (t.textContent || "").trim()).filter(Boolean);
+				const best = _fuzzyBest(lc, tabLabels);
+				if (best) target = tabs.find(t => (t.textContent || "").trim() === best);
+			}
+			if (target) { target.click(); return; }
+		}
+
+		// 3. Generic DOM heading — fuzzy text match
+		const allHeadings = Array.from(document.querySelectorAll(
+			".section-head, .section-heading, [data-section], .form-section .panel-heading, .accordion-toggle"
+		)).filter(el => el.offsetParent);
+		const headingTexts = allHeadings.map(el => (el.textContent || "").trim()).filter(Boolean);
+		const bestHdg = _fuzzyBest(lc, headingTexts);
+		if (bestHdg) {
+			const el = allHeadings.find(e => (e.textContent || "").trim() === bestHdg);
+			if (el) { el.click(); el.scrollIntoView({ behavior: "smooth", block: "start" }); return; }
 		}
 	}
 
+	function _resolveChildFieldname(tableFieldname, raw) {
+		if (!cur_frm || !raw) return raw;
+		// Get child doctype
+		const parentMeta = cur_frm.meta;
+		const tableDef = parentMeta && (parentMeta.fields || []).find(f => f.fieldname === tableFieldname && f.fieldtype === "Table");
+		if (!tableDef || !tableDef.options) return raw;
+		const childMeta = frappe.get_meta && frappe.get_meta(tableDef.options);
+		if (!childMeta) return raw;
+		const fields = childMeta.fields || [];
+		const lc = raw.toLowerCase();
+		const exactFn = fields.find(f => f.fieldname === raw || f.fieldname.toLowerCase() === lc);
+		if (exactFn) return exactFn.fieldname;
+		const labelMatch = fields.find(f => (f.label || "").toLowerCase() === lc);
+		if (labelMatch) return labelMatch.fieldname;
+		const bestFn = _fuzzyBest(lc, fields.map(f => f.fieldname));
+		if (bestFn) return bestFn;
+		const bestLbl = _fuzzyBest(lc, fields.map(f => f.label || "").filter(Boolean));
+		if (bestLbl) {
+			const f = fields.find(f => f.label === bestLbl);
+			if (f) return f.fieldname;
+		}
+		return raw;
+	}
+
+	function _doSetChildRowValue(tableFieldname, rowIndex, fieldname, value) {
+		if (!cur_frm || !tableFieldname || !fieldname) return;
+		fieldname = _resolveChildFieldname(tableFieldname, fieldname);
+		const rows = cur_frm.doc[tableFieldname] || [];
+		const row = rows[rowIndex];
+		if (!row) { frappe.show_alert({ message: `Row ${rowIndex} not found in ${tableFieldname}.`, indicator: "orange" }, 3); return; }
+		frappe.model.set_value(row.doctype, row.name, fieldname, value);
+		cur_frm.refresh_field(tableFieldname);
+	}
+
+	function _doDeleteChildRow(tableFieldname, rowIndex) {
+		if (!cur_frm || !tableFieldname) return;
+		const rows = cur_frm.doc[tableFieldname] || [];
+		const row = rows[rowIndex];
+		if (!row) { frappe.show_alert({ message: `Row ${rowIndex} not found.`, indicator: "orange" }, 3); return; }
+		cur_frm.get_field(tableFieldname).grid.grid_rows[rowIndex].remove();
+		cur_frm.refresh_field(tableFieldname);
+	}
+
+	// ── Generic click / type ──────────────────────────────────────────────────
+	function _doClickButton(label) {
+		if (!label) return;
+		const lc = label.toLowerCase().trim();
+
+		// Collect all candidate elements with their text labels
+		const collectCandidates = () => {
+			const out = []; // [{el, text}]
+			// Form primary button
+			if (cur_frm && cur_frm.page && cur_frm.page.btn_primary) {
+				const pb = cur_frm.page.btn_primary;
+				if (pb[0]) out.push({ el: pb[0], text: (pb.text ? pb.text() : pb[0].textContent || "").trim() });
+			}
+			// Form custom buttons
+			if (cur_frm && cur_frm.custom_buttons) {
+				for (const [bl, btn] of Object.entries(cur_frm.custom_buttons)) {
+					if (btn[0]) out.push({ el: btn[0], text: bl });
+				}
+			}
+			// Form menu dropdown items
+			if (cur_frm && cur_frm.page && cur_frm.page.menu_btn_group) {
+				const items = cur_frm.page.menu_btn_group[0]
+					? cur_frm.page.menu_btn_group[0].querySelectorAll(".dropdown-item")
+					: [];
+				for (const el of items) {
+					if (el.offsetParent) out.push({ el, text: (el.textContent || "").trim() });
+				}
+			}
+			// Page-wide buttons
+			document.querySelectorAll(
+				".page-head button, .page-content button, .modal-footer button, .navbar button, .btn, [role=button]"
+			).forEach(el => {
+				if (el.offsetParent !== null && !el.disabled) {
+					const txt = (el.textContent || el.getAttribute("data-label") || el.getAttribute("aria-label") || "").trim();
+					if (txt) out.push({ el, text: txt });
+				}
+			});
+			return out;
+		};
+
+		const candidates = collectCandidates();
+
+		// 1. Exact / starts-with match
+		for (const { el, text } of candidates) {
+			const t = text.toLowerCase();
+			if (t === lc || t.startsWith(lc)) { _triggerClick(el); return; }
+		}
+
+		// 2. Fuzzy match
+		const bestItem = _fuzzyBest(lc, candidates.map(c => c.text));
+		if (bestItem) {
+			const found = candidates.find(c => c.text === bestItem);
+			if (found) { _triggerClick(found.el); return; }
+		}
+
+		frappe.show_alert({ message: `Button "${label}" not found on this page.`, indicator: "orange" }, 4);
+	}
+
+	function _triggerClick(el) {
+		// Handle both jQuery objects and native DOM elements
+		if (el && el.trigger) el.trigger("click");
+		else if (el) el.click();
+	}
+
+	function _doClickElement(selector, text) {
+		// By CSS selector
+		if (selector) {
+			const el = document.querySelector(selector);
+			if (el && el.offsetParent !== null) { el.click(); return; }
+		}
+		if (text) {
+			const lc = text.toLowerCase();
+			const candidates = Array.from(document.querySelectorAll(
+				"a, button, [role=button], .btn, td, li, .dropdown-item, label, .frappe-control .control-label"
+			)).filter(el => el.offsetParent !== null);
+			// 1. Exact substring match
+			const exactMatch = candidates.find(el => (el.textContent || "").toLowerCase().trim().includes(lc));
+			if (exactMatch) { exactMatch.click(); return; }
+			// 2. Fuzzy match
+			const texts = candidates.map(el => (el.textContent || "").trim()).filter(Boolean);
+			const best = _fuzzyBest(lc, texts);
+			if (best) {
+				const found = candidates.find(el => (el.textContent || "").trim() === best);
+				if (found) { found.click(); return; }
+			}
+		}
+		frappe.show_alert({ message: `Element not found: ${selector || text}`, indicator: "orange" }, 4);
+	}
+
+	function _doTypeInElement(selector, label, text) {
+		let el = null;
+
+		// By CSS selector
+		if (selector) el = document.querySelector(selector);
+
+		// By label text → find associated input (exact, then fuzzy)
+		if (!el && label) {
+			const lc = label.toLowerCase();
+			const allLabels = Array.from(document.querySelectorAll(".frappe-control label, .form-group label, label"));
+
+			// Exact / substring match
+			let matchedLbl = allLabels.find(lbl => (lbl.textContent || "").toLowerCase().trim().includes(lc) && lbl.offsetParent);
+			// Fuzzy fallback
+			if (!matchedLbl) {
+				const lblTexts = allLabels.filter(l => l.offsetParent).map(l => (l.textContent || "").trim()).filter(Boolean);
+				const bestTxt = _fuzzyBest(lc, lblTexts);
+				if (bestTxt) matchedLbl = allLabels.find(l => (l.textContent || "").trim() === bestTxt);
+			}
+
+			if (matchedLbl) {
+				const ctrl = matchedLbl.closest(".frappe-control, .form-group");
+				if (ctrl) el = ctrl.querySelector("input, select, textarea");
+				if (!el && matchedLbl.htmlFor) el = document.getElementById(matchedLbl.htmlFor);
+			}
+
+			// aria-label / placeholder fallback
+			if (!el) {
+				el = document.querySelector(`[aria-label*="${label}"], input[placeholder*="${label}"], textarea[placeholder*="${label}"]`);
+			}
+		}
+
+		if (!el || el.offsetParent === null) {
+			frappe.show_alert({ message: `Input not found: ${selector || label}`, indicator: "orange" }, 4);
+			return;
+		}
+
+		el.focus();
+		const nativeSetter = Object.getOwnPropertyDescriptor(
+			el.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype, "value"
+		);
+		if (nativeSetter && nativeSetter.set) nativeSetter.set.call(el, text);
+		else el.value = text;
+		el.dispatchEvent(new Event("input", { bubbles: true }));
+		el.dispatchEvent(new Event("change", { bubbles: true }));
+	}
+
+	// ── List filters ──────────────────────────────────────────────────────────
+	function _resolveFormFieldname(raw) {
+		if (!cur_frm || !raw) return raw;
+		const meta = cur_frm.meta;
+		const fields = (meta && meta.fields) || [];
+		const lc = raw.toLowerCase();
+		// Exact fieldname
+		const exactFn = fields.find(f => f.fieldname === raw || f.fieldname.toLowerCase() === lc);
+		if (exactFn) return exactFn.fieldname;
+		// Label match
+		const labelMatch = fields.find(f => (f.label || "").toLowerCase() === lc);
+		if (labelMatch) return labelMatch.fieldname;
+		// Fuzzy fieldname
+		const fieldnames = fields.map(f => f.fieldname);
+		const bestFn = _fuzzyBest(lc, fieldnames);
+		if (bestFn) return bestFn;
+		// Fuzzy label → fieldname
+		const labels = fields.map(f => f.label || "").filter(Boolean);
+		const bestLbl = _fuzzyBest(lc, labels);
+		if (bestLbl) {
+			const f = fields.find(f => f.label === bestLbl);
+			if (f) return f.fieldname;
+		}
+		return raw;
+	}
+
+	function _resolveListFieldname(raw) {
+		if (!cur_list || !raw) return raw;
+		const lc = raw.toLowerCase();
+		// 1. Exact fieldname match
+		const meta = frappe.get_meta && frappe.get_meta(cur_list.doctype);
+		const fields = (meta && meta.fields) || [];
+		const exactFn = fields.find(f => f.fieldname === raw || f.fieldname.toLowerCase() === lc);
+		if (exactFn) return exactFn.fieldname;
+		// 2. Label match
+		const labelMatch = fields.find(f => (f.label || "").toLowerCase() === lc);
+		if (labelMatch) return labelMatch.fieldname;
+		// 3. Fuzzy against fieldnames
+		const fieldnames = fields.map(f => f.fieldname);
+		const bestFn = _fuzzyBest(lc, fieldnames);
+		if (bestFn) return bestFn;
+		// 4. Fuzzy against labels → return fieldname
+		const labels = fields.map(f => f.label || "").filter(Boolean);
+		const bestLbl = _fuzzyBest(lc, labels);
+		if (bestLbl) {
+			const f = fields.find(f => f.label === bestLbl);
+			if (f) return f.fieldname;
+		}
+		return raw; // fallback — let Frappe error naturally
+	}
+
+	function _doAddListFilter(fieldname, operator, value) {
+		if (!cur_list || !fieldname) return;
+		operator = operator || "=";
+		fieldname = _resolveListFieldname(fieldname);
+		try {
+			// frappe.ui.FilterGroup / list.filter_area
+			if (cur_list.filter_area) {
+				cur_list.filter_area.add([[cur_list.doctype, fieldname, operator, value]]);
+			} else if (cur_list.filters !== undefined) {
+				// legacy path
+				cur_list.filters = (cur_list.filters || []).filter(f => f[1] !== fieldname);
+				cur_list.filters.push([cur_list.doctype, fieldname, operator, value]);
+				cur_list.refresh();
+			}
+		} catch (e) {
+			frappe.show_alert({ message: `Could not add filter: ${e.message}`, indicator: "orange" }, 4);
+		}
+	}
+
+	function _doRemoveListFilter(fieldname) {
+		if (!cur_list || !fieldname) return;
+		fieldname = _resolveListFieldname(fieldname);
+		try {
+			if (cur_list.filter_area && cur_list.filter_area.filter_list) {
+				cur_list.filter_area.filter_list.filters
+					.filter(f => f.fieldname === fieldname)
+					.forEach(f => f.remove());
+			} else if (Array.isArray(cur_list.filters)) {
+				cur_list.filters = cur_list.filters.filter(f => f[1] !== fieldname);
+				cur_list.refresh();
+			}
+		} catch (e) { _log("remove_list_filter error:", e); }
+	}
+
+	function _doClearListFilters() {
+		if (!cur_list) return;
+		try {
+			if (cur_list.filter_area) cur_list.filter_area.clear_filters();
+			else { cur_list.filters = []; cur_list.refresh(); }
+		} catch (e) { _log("clear_list_filters error:", e); }
+	}
+
+	// ── List toolbar ──────────────────────────────────────────────────────────
+	function _doClickListAction(listAction) {
+		if (!listAction) return;
+		const lc = listAction.toLowerCase().trim();
+
+		const collectListCandidates = () => {
+			const out = [];
+			if (cur_list && cur_list.page) {
+				const tb = cur_list.page.inner_toolbar;
+				if (tb && tb[0]) {
+					tb[0].querySelectorAll("button, .dropdown-item, a").forEach(el => {
+						if (el.offsetParent) out.push({ el, text: (el.textContent || "").trim() });
+					});
+				}
+			}
+			document.querySelectorAll(
+				".list-toolbar button, .list-header button, .page-actions button, .actions-btn-group .dropdown-item"
+			).forEach(el => {
+				if (el.offsetParent) out.push({ el, text: (el.textContent || "").trim() });
+			});
+			return out;
+		};
+
+		const candidates = collectListCandidates();
+		// Exact
+		const exact = candidates.find(c => c.text.toLowerCase().trim() === lc);
+		if (exact) { exact.el.click(); return; }
+		// Fuzzy
+		const best = _fuzzyBest(lc, candidates.map(c => c.text));
+		if (best) {
+			const found = candidates.find(c => c.text === best);
+			if (found) { found.el.click(); return; }
+		}
+
+		frappe.show_alert({ message: `List action "${listAction}" not found.`, indicator: "orange" }, 4);
+	}
+
+	function _doSelectListRows(selectAll, names) {
+		if (!cur_list) return;
+		if (selectAll) {
+			// Click the select-all checkbox
+			const chk = document.querySelector(".list-check-all, .select-all-checkbox, input[data-fieldname='check_all']");
+			if (chk) { chk.checked = true; chk.dispatchEvent(new Event("change", { bubbles: true })); return; }
+			if (cur_list.select_all) { cur_list.select_all(); return; }
+		}
+		if (names && names.length) {
+			names.forEach(name => {
+				const row = document.querySelector(`.list-row[data-name="${CSS.escape(name)}"]`);
+				if (row) {
+					const chk = row.querySelector("input[type=checkbox]");
+					if (chk) { chk.checked = true; chk.dispatchEvent(new Event("change", { bubbles: true })); }
+				}
+			});
+		}
+	}
+
+	// ── Report ────────────────────────────────────────────────────────────────
+	function _doSetReportFilter(filterLabel, value) {
+		if (!window.frappe || !frappe.query_report) {
+			frappe.show_alert({ message: "No report is open.", indicator: "orange" }, 3); return;
+		}
+		const lc = filterLabel.toLowerCase();
+		const filters = frappe.query_report.filters || [];
+
+		// Exact / substring match
+		let target = filters.find(f => {
+			const l = (f.df && f.df.label || "").toLowerCase();
+			return l === lc || l.includes(lc);
+		});
+
+		// Fuzzy fallback
+		if (!target) {
+			const labels = filters.map(f => (f.df && f.df.label) || "").filter(Boolean);
+			const best = _fuzzyBest(lc, labels);
+			if (best) target = filters.find(f => (f.df && f.df.label) === best);
+		}
+
+		if (target) {
+			if (target.set_value) { target.set_value(value); return; }
+			if (target.df && target.df.fieldname) { frappe.query_report.set_filter_value(target.df.fieldname, value); return; }
+		}
+
+		frappe.show_alert({ message: `Report filter "${filterLabel}" not found.`, indicator: "orange" }, 4);
+	}
+
+	function _doRunReport() {
+		if (window.frappe && frappe.query_report && frappe.query_report.refresh) {
+			frappe.query_report.refresh(); return;
+		}
+		// Fallback: click the Run button
+		const runBtn = document.querySelector(".run-report-btn, button[data-action=run_query], .btn-run");
+		if (runBtn) runBtn.click();
+	}
+
+	// ── Dialog ────────────────────────────────────────────────────────────────
+	function _doDialogButtonClick(label) {
+		const lc = (label || "").toLowerCase().trim();
+		const dlg = frappe._cur_dialog;
+
+		const collectDlgCandidates = () => {
+			const out = [];
+			if (dlg && dlg.get_primary_btn) {
+				const pb = dlg.get_primary_btn();
+				if (pb && pb[0]) out.push({ el: pb[0], text: (pb.text ? pb.text() : pb[0].textContent || "").trim() });
+			}
+			document.querySelectorAll(".modal.show .modal-footer button, .modal-dialog button, .frappe-dialog button")
+				.forEach(el => { if (el.offsetParent) out.push({ el, text: (el.textContent || "").trim() }); });
+			return out;
+		};
+
+		const candidates = collectDlgCandidates();
+		const exact = candidates.find(c => c.text.toLowerCase().trim() === lc);
+		if (exact) { _triggerClick(exact.el); return; }
+		const best = _fuzzyBest(lc, candidates.map(c => c.text));
+		if (best) {
+			const found = candidates.find(c => c.text === best);
+			if (found) { _triggerClick(found.el); return; }
+		}
+		frappe.show_alert({ message: `Dialog button "${label}" not found.`, indicator: "orange" }, 4);
+	}
+
+	function _doCloseDialog() {
+		const dlg = frappe._cur_dialog;
+		if (dlg && dlg.hide) { dlg.hide(); return; }
+		const closeBtn = document.querySelector(".modal.show .btn-modal-close, .modal.show .close, .frappe-dialog .btn-modal-close");
+		if (closeBtn) closeBtn.click();
+	}
+
 	function _interactLabel(payload) {
-		const { action, button_label, fieldname, value, list_action, doctype } = payload;
-		if (action === "click_button" || action === "trigger_form_action") return `Clicking "${button_label}"`;
-		if (action === "set_field_value") return `Setting ${fieldname} → ${value}`;
-		if (action === "save_form") return "Saving form";
-		if (action === "submit_document") return "Submitting document";
-		if (action === "cancel_document") return "Cancelling document";
-		if (action === "amend_document") return "Amending document";
-		if (action === "delete_document") return "Deleting document";
+		const { action, button_label, fieldname, value, list_action, doctype, table_fieldname, row_index, section_label, filter_label, selector, text, label } = payload;
+		const map = {
+			"save_form": "Saving form",
+			"submit_document": "Submitting document",
+			"cancel_document": "Cancelling document",
+			"amend_document": "Amending document",
+			"delete_document": "Deleting document",
+			"clear_list_filters": "Clearing filters",
+			"run_report": "Running report",
+			"close_dialog": "Closing dialog",
+		};
+		if (map[action]) return map[action];
 		if (action === "new_document") return `New ${doctype || "document"}`;
-		if (action === "click_list_action") return `List action: ${list_action}`;
+		if (action === "set_field_value") return `Set ${fieldname} → ${value}`;
+		if (action === "scroll_to_field") return `Scroll to ${fieldname}`;
+		if (action === "expand_section") return `Expand "${section_label}"`;
+		if (action === "add_child_row") return `Add row to ${table_fieldname}`;
+		if (action === "set_child_row_value") return `${table_fieldname}[${row_index}].${fieldname} → ${value}`;
+		if (action === "delete_child_row") return `Delete row ${row_index} from ${table_fieldname}`;
+		if (action === "click_button") return `Click "${button_label}"`;
+		if (action === "click_element") return `Click ${selector || text}`;
+		if (action === "type_in_element") return `Type "${payload.text}" into ${selector || label}`;
+		if (action === "add_list_filter") return `Filter ${fieldname} ${payload.operator || "="} ${value}`;
+		if (action === "remove_list_filter") return `Remove filter: ${fieldname}`;
+		if (action === "click_list_action") return `List: ${list_action}`;
+		if (action === "select_list_rows") return payload.select_all ? "Select all rows" : `Select ${(payload.names||[]).length} rows`;
+		if (action === "set_report_filter") return `Report: ${filter_label} → ${value}`;
 		if (action === "open_quick_entry") return `Quick entry: ${doctype}`;
-		if (action === "scroll_to_field") return `Scrolling to ${fieldname}`;
+		if (action === "open_dialog_action") return `Dialog: "${button_label}"`;
 		return action;
 	}
 

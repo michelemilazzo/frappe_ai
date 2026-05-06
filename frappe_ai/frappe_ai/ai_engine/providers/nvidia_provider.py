@@ -49,12 +49,39 @@ def _wrap_nvidia_error(exc):
 	raise ProviderError(str(exc)) from exc
 
 
+def _flatten_content(content) -> str:
+	"""
+	Normalise content to a plain string.
+	Some NVIDIA models return content as a structured object or list:
+	  {"type": "text", "text": "Hello!"}
+	  [{"type": "text", "text": "Hello!"}]
+	Extract the text value so we never display raw JSON to the user.
+	"""
+	if isinstance(content, str):
+		return content
+	if isinstance(content, dict):
+		# {"type": "text", "text": "..."}
+		if content.get("type") == "text":
+			return content.get("text") or ""
+		# {"type": "something_else"} — stringify safely
+		return content.get("text") or content.get("content") or ""
+	if isinstance(content, list):
+		parts = []
+		for item in content:
+			if isinstance(item, dict) and item.get("type") == "text":
+				parts.append(item.get("text") or "")
+			elif isinstance(item, str):
+				parts.append(item)
+		return "".join(parts)
+	return str(content) if content is not None else ""
+
+
 def _build_messages(messages: list) -> list:
 	"""Pass messages through in OpenAI format, preserving tool roles."""
 	result = []
 	for msg in messages:
 		role = msg.get("role", "user")
-		content = msg.get("content", "") or ""
+		content = _flatten_content(msg.get("content", "") or "")
 
 		if role == "tool":
 			result.append({
@@ -74,6 +101,9 @@ def _build_messages(messages: list) -> list:
 	return result
 
 
+_CONTENT_BLOCK_TYPES = {"text", "image_url", "image", "document", "tool_result", "tool_use"}
+
+
 def _extract_tool_calls_from_content(content: str) -> list | None:
 	"""
 	NVIDIA Llama models emit tool calls as plain JSON in content instead of
@@ -82,6 +112,8 @@ def _extract_tool_calls_from_content(content: str) -> list | None:
 	Handles: {"name": "fn", "parameters": {...}}
 	         {"type": "function", "name": "fn", "parameters": {...}}
 	         [{"name": "fn", "parameters": {...}}, ...]
+
+	Explicitly rejects content-block objects like {"type": "text", "text": "..."}.
 	"""
 	if not content or "{" not in content:
 		return None
@@ -103,6 +135,15 @@ def _extract_tool_calls_from_content(content: str) -> list | None:
 		except (json.JSONDecodeError, ValueError):
 			continue
 
+		# Reject content-block objects immediately — these are NOT tool calls
+		if isinstance(parsed, dict):
+			block_type = parsed.get("type", "")
+			if block_type in _CONTENT_BLOCK_TYPES:
+				return None
+		if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+			if parsed[0].get("type", "") in _CONTENT_BLOCK_TYPES:
+				return None
+
 		calls = parsed if isinstance(parsed, list) else [parsed]
 		if not isinstance(calls, list):
 			continue
@@ -110,6 +151,9 @@ def _extract_tool_calls_from_content(content: str) -> list | None:
 		result = []
 		for c in calls:
 			if not isinstance(c, dict):
+				continue
+			# Skip content blocks within arrays too
+			if c.get("type", "") in _CONTENT_BLOCK_TYPES:
 				continue
 			name = c.get("name") or c.get("function", {}).get("name", "")
 			if not name:
@@ -154,7 +198,7 @@ class NvidiaProvider(BaseProvider):
 			response = client.chat.completions.create(**kwargs)
 			choice = response.choices[0] if response.choices else None
 			msg = choice.message if choice else None
-			content = (msg.content or "") if msg else ""
+			content = _flatten_content((msg.content or "") if msg else "")
 			finish_reason = (choice.finish_reason if choice else None) or "stop"
 
 			# Primary: proper tool_calls field
@@ -237,11 +281,13 @@ class NvidiaProvider(BaseProvider):
 				delta = choice.delta if choice else None
 
 				if delta and delta.content:
-					accumulated_text += delta.content
-					if buffered_tokens is not None:
-						buffered_tokens.append(delta.content)
-					else:
-						yield {"event": "token", "data": {"delta": delta.content}}
+					piece = _flatten_content(delta.content)
+					if piece:
+						accumulated_text += piece
+						if buffered_tokens is not None:
+							buffered_tokens.append(piece)
+						else:
+							yield {"event": "token", "data": {"delta": piece}}
 
 				if delta and delta.tool_calls:
 					for tc_delta in delta.tool_calls:
