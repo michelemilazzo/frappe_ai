@@ -8,6 +8,7 @@ from werkzeug.wrappers import Response
 
 from frappe_ai.frappe_ai.ai_engine.base_provider import (
 	ProviderAuthError,
+	ProviderContextLengthError,
 	ProviderError,
 	ProviderRateLimitError,
 )
@@ -143,7 +144,7 @@ def stream_message(conversation_id: str, message: str, attachment: str = None):
 	# Build context and tools before generator (reads DB — safe here)
 	from frappe_ai.frappe_ai.ai_engine.context_manager import build_context
 
-	context_messages = build_context(conversation_id, msg, user, settings)
+	context_messages = build_context(conversation_id, msg, user, settings, provider=provider)
 
 	tools = []
 	if settings.get("tool_calling_enabled"):
@@ -239,6 +240,9 @@ def _generate_stream(
 	except ProviderAuthError:
 		frappe.log_error(frappe.get_traceback(), "AI stream_message auth error")
 		yield _sse("error", {"code": "auth_error", "message": "Invalid API key. Please check AI Assistant Settings."})
+		return
+	except ProviderContextLengthError as exc:
+		yield _sse("error", {"code": "context_length", "message": str(exc)})
 		return
 	except ProviderError as exc:
 		frappe.log_error(frappe.get_traceback(), "AI stream_message provider error")

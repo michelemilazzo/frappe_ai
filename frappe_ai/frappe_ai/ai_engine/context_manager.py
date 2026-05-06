@@ -86,7 +86,7 @@ def build_system_prompt(user: str) -> str:
 	return prompt
 
 
-def build_context(conversation_id: str, new_message: str, user: str, settings: dict) -> list:
+def build_context(conversation_id: str, new_message: str, user: str, settings: dict, provider=None) -> list:
 	system_prompt = build_system_prompt(user)
 	messages = [{"role": "system", "content": system_prompt}]
 
@@ -96,7 +96,17 @@ def build_context(conversation_id: str, new_message: str, user: str, settings: d
 		if conv_doc.owner != user and "System Manager" not in frappe.get_roles(user):
 			raise PermissionError("Access denied to this conversation.")
 
-		max_context_tokens = int(settings.get("max_tokens", 8192) * 0.75)
+		setting_budget = int(settings.get("max_tokens", 8192) * 0.75)
+		if provider is not None:
+			try:
+				# Reserve half the provider's context window for history; the rest
+				# covers system prompt + new message + output tokens.
+				provider_budget = provider.get_context_window() // 2
+				max_context_tokens = min(setting_budget, provider_budget)
+			except Exception:
+				max_context_tokens = setting_budget
+		else:
+			max_context_tokens = setting_budget
 
 		all_messages = list(conv_doc.messages or [])
 		token_budget = max_context_tokens
