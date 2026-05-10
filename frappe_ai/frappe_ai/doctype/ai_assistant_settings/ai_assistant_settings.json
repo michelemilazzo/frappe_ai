@@ -28,16 +28,16 @@
   "audit_log_retention_days"
  ],
  "fields": [
-  {
-   "default": "Gemini",
-   "description": "OpenAI, Anthropic, and Ollama are comming soon",
-   "fieldname": "provider",
-   "fieldtype": "Select",
-   "in_list_view": 1,
-   "label": "Provider",
-   "options": "Gemini\nGroq\nGrok\nNvidia",
-   "reqd": 1
-  },
+{
+    "default": "OpenCode",
+    "description": "OpenCode.ai usa OpenRouter come fallback tra modelli gratuiti e a pagamento. Inserisci la tua API key da https://opencode.ai",
+    "fieldname": "provider",
+    "fieldtype": "Select",
+    "in_list_view": 1,
+    "label": "Provider",
+    "options": "OpenCode\nGemini\nGroq\nGrok\nNvidia",
+    "reqd": 1
+   },
   {
    "fieldname": "api_key",
    "fieldtype": "Password",

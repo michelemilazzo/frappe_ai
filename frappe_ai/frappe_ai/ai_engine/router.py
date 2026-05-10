@@ -10,6 +10,7 @@ PROVIDER_MAP = {
 	"Ollama": "frappe_ai.frappe_ai.ai_engine.providers.ollama_provider.OllamaProvider",
 	"Grok": "frappe_ai.frappe_ai.ai_engine.providers.grok_provider.GrokProvider",
 	"Nvidia": "frappe_ai.frappe_ai.ai_engine.providers.nvidia_provider.NvidiaProvider",
+	"OpenCode": "frappe_ai.frappe_ai.ai_engine.providers.opencode_provider.OpenCodeProvider",
 }
 
 
