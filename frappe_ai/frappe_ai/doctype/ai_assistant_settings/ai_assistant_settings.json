@@ -30,11 +30,12 @@
  "fields": [
   {
    "default": "Gemini",
+   "description": "OpenAI, Anthropic, and Ollama are comming soon",
    "fieldname": "provider",
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Provider",
-   "options": "Gemini\nOpenAI\nAnthropic\nGroq\nOllama\nGrok\nNvidia",
+   "options": "Gemini\nGroq\nGrok\nNvidia",
    "reqd": 1
   },
   {
@@ -53,7 +54,8 @@
    "default": "gemini-2.0-flash",
    "fieldname": "model",
    "fieldtype": "Data",
-   "label": "Model"
+   "label": "Model",
+   "reqd": 1
   },
   {
    "fieldname": "column_break_1",
@@ -152,7 +154,7 @@
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-05-05 22:50:21.823367",
+ "modified": "2026-05-10 20:45:58.644186",
  "modified_by": "Administrator",
  "module": "Frappe AI",
  "name": "AI Assistant Settings",
