@@ -1,0 +1,27 @@
+# OpenCode CLI config per gestione frappe_ai
+# Usa questo file con: opencode --config opencode.jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "anthropic/claude-sonnet-4-5",
+  "small_model": "anthropic/claude-haiku-4-5",
+  "provider": {
+    "anthropic": {
+      "models": {},
+      "options": {
+        "apiKey": "{env:ANTHROPIC_API_KEY}"
+      }
+    },
+    "openrouter": {
+      "models": {},
+      "options": {
+        "apiKey": "{env:OPENROUTER_API_KEY}"
+      }
+    },
+    "openai": {
+      "models": {},
+      "options": {
+        "apiKey": "{env:OPENAI_API_KEY}"
+      }
+    }
+  }
+}

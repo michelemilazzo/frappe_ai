@@ -1,10 +1,10 @@
 app_name = "frappe_ai"
-app_title = "Frappe AI"
-app_publisher = "Karan Mistry"
-app_description = "A plug-and-play AI chat assistant for Frappe v16 — powered by OpenAI, Anthropic, Gemini, Groq, or self-hosted LLMs. Conversational database access scoped strictly to the logged-in user's permissions. Native Espresso UI. Zero config to start."
-app_email = "ksmistry007@gmail.com"
+app_title = "Frappe AI — DevOps Assistant"
+app_publisher = "Michele Milazzo"
+app_description = "AI-powered DevOps assistant for Frappe v16 — powered by OpenCode.ai, Gemini, Groq, Anthropic, or self-hosted LLMs. 18 integrated tools for app management, code analysis, bug monitoring, and automation. Native Espresso UI."
+app_email = "michelemilazzo@gmail.com"
 app_license = "mit"
-app_version = "1.0.0"
+app_version = "1.1.0"
 
 app_include_js = "/assets/frappe_ai/js/frappe_ai_chat.js"
 
