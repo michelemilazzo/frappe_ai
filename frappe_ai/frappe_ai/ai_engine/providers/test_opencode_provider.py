@@ -1,6 +1,6 @@
 """Test coverage for OpenCode provider."""
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 
 class TestOpenCodeProvider(unittest.IsolatedAsyncioTestCase):
@@ -17,7 +17,7 @@ class TestOpenCodeProvider(unittest.IsolatedAsyncioTestCase):
 
 	def test_provider_can_be_imported(self):
 		"""The OpenCodeProvider class must be importable."""
-		from frappe_ai.frappe_ai.ai_engine.providers.opencode_provider import (
+		from .opencode_provider import (
 			OpenCodeProvider,
 			_get_api_type,
 			_get_endpoint_url,
@@ -27,9 +27,7 @@ class TestOpenCodeProvider(unittest.IsolatedAsyncioTestCase):
 
 	def test_get_api_type_routing(self):
 		"""Model name prefix correctly determines API type."""
-		from frappe_ai.frappe_ai.ai_engine.providers.opencode_provider import (
-			_get_api_type,
-		)
+		from .opencode_provider import _get_api_type
 
 		self.assertEqual(_get_api_type("gpt-5.2"), "responses")
 		self.assertEqual(_get_api_type("o3-mini"), "responses")
@@ -41,9 +39,7 @@ class TestOpenCodeProvider(unittest.IsolatedAsyncioTestCase):
 
 	def test_endpoint_urls(self):
 		"""Correct endpoint URL for each API type."""
-		from frappe_ai.frappe_ai.ai_engine.providers.opencode_provider import (
-			_get_endpoint_url,
-		)
+		from .opencode_provider import _get_endpoint_url
 
 		self.assertEqual(
 			_get_endpoint_url("gpt-5.2", "responses"),
@@ -64,9 +60,7 @@ class TestOpenCodeProvider(unittest.IsolatedAsyncioTestCase):
 
 	def test_provider_instantiation(self):
 		"""Provider creates instance with correct attributes."""
-		from frappe_ai.frappe_ai.ai_engine.providers.opencode_provider import (
-			OpenCodeProvider,
-		)
+		from .opencode_provider import OpenCodeProvider
 
 		provider = OpenCodeProvider(self.mock_settings)
 		self.assertEqual(provider.api_key, "test-key-123")
@@ -76,9 +70,7 @@ class TestOpenCodeProvider(unittest.IsolatedAsyncioTestCase):
 
 	def test_supports_capabilities(self):
 		"""Provider reports correct capabilities."""
-		from frappe_ai.frappe_ai.ai_engine.providers.opencode_provider import (
-			OpenCodeProvider,
-		)
+		from .opencode_provider import OpenCodeProvider
 
 		provider = OpenCodeProvider(self.mock_settings)
 		self.assertTrue(provider.supports_tools())
@@ -86,9 +78,7 @@ class TestOpenCodeProvider(unittest.IsolatedAsyncioTestCase):
 
 	def test_context_window(self):
 		"""Known context window sizes."""
-		from frappe_ai.frappe_ai.ai_engine.providers.opencode_provider import (
-			OpenCodeProvider,
-		)
+		from .opencode_provider import OpenCodeProvider
 
 		p1 = OpenCodeProvider({**self.mock_settings, "model": "gpt-5.2"})
 		self.assertEqual(p1.get_context_window(), 200_000)
@@ -101,9 +91,7 @@ class TestOpenCodeProvider(unittest.IsolatedAsyncioTestCase):
 
 	def test_token_counting(self):
 		"""Approximate token count is reasonable."""
-		from frappe_ai.frappe_ai.ai_engine.providers.opencode_provider import (
-			OpenCodeProvider,
-		)
+		from .opencode_provider import OpenCodeProvider
 
 		provider = OpenCodeProvider(self.mock_settings)
 		messages = [
@@ -115,9 +103,33 @@ class TestOpenCodeProvider(unittest.IsolatedAsyncioTestCase):
 		# Rough sanity: ~10 words ≈ ~13 tokens (chars/4)
 		self.assertLess(count, 50)
 
+	def test_list_supported_models(self):
+		"""Supported model list can be read from Zen endpoint response."""
+		from .opencode_provider import OpenCodeProvider
+
+		mock_client = MagicMock()
+		mock_client.is_closed = False
+		mock_client.get.return_value = MagicMock(
+			raise_for_status=lambda: None,
+			json=lambda: {
+				"data": [
+					{"id": "glm-5"},
+					{"id": "kimi-k2.6"},
+					{"id": "qwen3.6-plus"},
+				]
+			},
+		)
+
+		provider = OpenCodeProvider(self.mock_settings)
+		provider.__dict__["_client"] = mock_client
+
+		models = provider.list_supported_models()
+		self.assertIn("glm-5", models)
+		self.assertTrue(provider.supports_model("kImI-k2.6"))
+
 	def test_router_registers_opencode(self):
 		"""OpenCode is registered in the PROVIDER_MAP."""
-		from frappe_ai.frappe_ai.ai_engine.router import PROVIDER_MAP
+		from ...ai_engine.router import PROVIDER_MAP
 
 		self.assertIn("OpenCode", PROVIDER_MAP)
 		self.assertIn("opencode_provider", PROVIDER_MAP["OpenCode"])

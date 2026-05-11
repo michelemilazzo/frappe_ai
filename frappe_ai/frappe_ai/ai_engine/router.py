@@ -1,4 +1,5 @@
 import frappe
+from frappe.utils.password import get_decrypted_password
 
 from frappe_ai.frappe_ai.ai_engine.base_provider import ProviderError
 
@@ -22,7 +23,7 @@ def get_settings() -> dict:
 		return cached
 
 	doc = frappe.get_single("AI Assistant Settings")
-	api_key = frappe.utils.password.get_decrypted_password(
+	api_key = get_decrypted_password(
 		"AI Assistant Settings", "AI Assistant Settings", "api_key"
 	)
 

@@ -5,7 +5,7 @@ import sys
 import os
 
 # Aggiungi il path dell'app
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import unittest
 
@@ -16,6 +16,7 @@ from frappe_ai.frappe_ai.ai_engine.providers.test_opencode_provider import (
     TestOpenCodeProvider,
     TestOpenCodeSyncChat,
 )
+from frappe_ai.frappe_ai.doctype.ai_assistant_settings.test_ai_assistant_settings import TestAIAssistantSettings
 
 
 def run_tests():
@@ -26,6 +27,7 @@ def run_tests():
     # Provider tests
     suite.addTests(loader.loadTestsFromTestCase(TestOpenCodeProvider))
     suite.addTests(loader.loadTestsFromTestCase(TestOpenCodeSyncChat))
+    suite.addTests(loader.loadTestsFromTestCase(TestAIAssistantSettings))
 
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)

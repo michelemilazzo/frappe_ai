@@ -52,6 +52,34 @@ def test_connection():
 		return {"status": "error", "message": str(exc)}
 
 
+@frappe.whitelist(allow_guest=False)
+def get_supported_models():
+	if not frappe.has_permission("AI Assistant Settings", "write"):
+		frappe.throw("Only System Managers can check supported models.", frappe.PermissionError)
+
+	try:
+		from frappe_ai.frappe_ai.ai_engine.router import get_provider, get_settings
+
+		settings = get_settings()
+		provider_name = settings.get("provider", "")
+		if provider_name != "OpenCode":
+			return {"status": "ok", "provider": provider_name, "models": [], "message": "Model validation is only available for OpenCode."}
+
+		provider = get_provider(settings)
+
+		models = provider.list_supported_models()
+		current_model = settings.get("model", "")
+		return {
+			"status": "ok",
+			"provider": provider_name,
+			"models": models,
+			"current_model": current_model,
+			"is_current_supported": current_model.lower() in {m.lower() for m in models},
+		}
+	except Exception as exc:
+		return {"status": "error", "message": str(exc)}
+
+
 @frappe.whitelist()
 def get_usage(period: str = "month"):
 	user = frappe.session.user
