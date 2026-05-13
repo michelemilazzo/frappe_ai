@@ -2,9 +2,10 @@
 
 ![Version](https://img.shields.io/badge/version-1.1.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Frappe](https://img.shields.io/badge/Frappe-v16-red)
+![Frappe](https://img.shields.io/badge/Frappe-v15+-red)
+![Python](https://img.shields.io/badge/Python-3.10+-blue)
 
-Assistente AI potenziato per **Frappe v16 / ERPNext** con supporto multi-provider (OpenCode.ai, Gemini, Groq, Grok, Nvidia) e **18 tool integrati** per gestire app, DocType, bug, e automazione — tutto con permessi utente rispettati.
+Assistente AI potenziato per **Frappe v15+ / ERPNext** con supporto multi-provider (OpenCode.ai, Gemini, Groq, Grok, Nvidia) e **18 tool integrati** per gestire app, DocType, bug, e automazione.
 
 ---
 
@@ -21,6 +22,14 @@ bench --site press.onekeyco.com install-app frappe_ai
 # 3. Riavvia
 sudo bench restart
 ```
+
+## 📋 Requisiti di Sistema
+
+| Requisito | Versione |
+|---|---|
+| **Python** | ≥ 3.10 |
+| **Frappe** | ≥ 15.0.0 |
+| **ERPNext** | ≥ 16.0.0 (opzionale) |
 
 ## 🎯 Provider AI Supportati
 
@@ -195,32 +204,31 @@ done
 sudo bench restart
 ```
 
-## 🛠️ Configurazione OpenCode CLI
+## 🛠️ Test & CI/CD
 
-Crea `~/.config/opencode/opencode.json`:
+### Eseguire i test localmente
 
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "model": "anthropic/claude-sonnet-4-5",
-  "small_model": "anthropic/claude-haiku-4-5",
-  "provider": {
-    "anthropic": {
-      "models": {},
-      "options": {
-        "apiKey": "{env:ANTHROPIC_API_KEY}"
-      }
-    },
-    "openrouter": {
-      "models": {},
-      "options": {
-        "apiKey": "{env:OPENROUTER_API_KEY}"
-      }
-    }
-  },
-  "instructions": ["./custom-instructions.md"]
-}
+```bash
+# Installa dipendenze di test
+pip install -e ".[test]"
+
+# Esegui tutti i test
+pytest -v
+
+# Esegui solo test di compatibilità
+pytest frappe_ai/tests/test_compatibility.py -v
+
+# Esegui con coverage
+pytest --cov=frappe_ai frappe_ai/tests/ -v
 ```
+
+### GitHub Actions
+
+I test vengono eseguiti automaticamente su ogni push:
+- ✅ Python 3.10, 3.11, 3.12
+- ✅ Compatibilità Frappe v15.0.0 e v16.0.0
+- ✅ Linting con ruff
+- ✅ Coverage reporting a Codecov
 
 ## 📜 Licenza
 
@@ -229,3 +237,5 @@ MIT — vedi [license.txt](license.txt)
 ## 🙏 Crediti
 
 Basato su [karanmistry007/frappe_ai](https://github.com/karanmistry007/frappe_ai) con l'aggiunta del provider OpenCode.ai e tool AI DevOps.
+
+**Autore**: Michele Milazzo — [michele.milazzo@live.com](mailto:michele.milazzo@live.com)
