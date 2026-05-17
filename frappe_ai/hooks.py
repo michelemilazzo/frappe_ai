@@ -8,7 +8,7 @@ app_email = "michelemilazzo@example.com"
 app_license = "MIT"
 
 # Frappe version compatibility
-frappe_version = ">=16.0.0,<17.0.0"
+frappe_version = ">=16.0.0 <17.0.0"
 
 # App dependencies
 requires_apps = []
