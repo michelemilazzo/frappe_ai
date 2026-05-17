@@ -1,0 +1,9 @@
+{
+  "name": "frappe_ai",
+  "version": "0.2.0",
+  "description": "AI chat assistant for Frappe",
+  "private": true,
+  "scripts": {
+    "build": "echo 'No build step required'"
+  }
+}
