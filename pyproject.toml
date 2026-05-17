@@ -4,12 +4,13 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "frappe-ai"
-version = "0.1.0"
-description = "AI chat assistant for Frappe — powered by OpenCode.ai (OpenRouter fallback)"
+version = "0.2.0"
+description = "AI chat assistant for Frappe — Claude, OpenRouter, OpenCode.ai, OpenAI"
 authors = [{name = "Michele Milazzo", email = "mic.milazzo@gmail.com"}]
 requires-python = ">=3.10"
 dependencies = [
     "frappe>=15.0.0",
+    "requests>=2.28.0",
 ]
 
 [project.optional-dependencies]
