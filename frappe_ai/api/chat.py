@@ -58,8 +58,6 @@ def _build_messages(system_prompt, history, user_message):
 def _call_provider(provider, api_key, model, messages):
     if provider == "Claude (Anthropic)":
         return _call_anthropic(api_key, model, messages)
-    elif provider == "OpenCode.ai":
-        return _call_openai_compatible("https://api.opencode.ai/v1/chat/completions", api_key, model, messages)
     elif provider == "OpenAI":
         return _call_openai_compatible("https://api.openai.com/v1/chat/completions", api_key, model, messages)
     else:
@@ -121,6 +119,11 @@ def _call_openai_compatible(url, api_key, model, messages):
     )
 
     if not resp.ok:
-        frappe.throw(_("AI provider error ({0}): {1}").format(url, resp.text[:300]))
+        frappe.throw(_("AI provider error {0} {1}: {2}").format(resp.status_code, url, resp.text[:300]))
 
-    return resp.json()["choices"][0]["message"]["content"]
+    try:
+        data = resp.json()
+    except Exception:
+        frappe.throw(_("AI provider returned invalid response (status {0}): {1}").format(resp.status_code, resp.text[:300]))
+
+    return data["choices"][0]["message"]["content"]
