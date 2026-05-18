@@ -141,3 +141,48 @@
 }
 #frappe-ai-send:hover { background: #4338ca; }
 #frappe-ai-send:disabled { background: #a5b4fc; cursor: not-allowed; }
+
+/* Attach button */
+#frappe-ai-attach {
+    background: none;
+    border: none;
+    color: #6b7280;
+    cursor: pointer;
+    padding: 4px 6px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    transition: color 0.15s;
+}
+#frappe-ai-attach:hover { color: #4f46e5; }
+
+/* Attachment chips */
+#frappe-ai-attachments {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 0 10px 4px;
+}
+.ai-attachment-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: #ede9fe;
+    color: #4f46e5;
+    border-radius: 12px;
+    padding: 2px 8px;
+    font-size: 11px;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ai-attachment-chip button {
+    background: none;
+    border: none;
+    color: #4f46e5;
+    cursor: pointer;
+    font-size: 14px;
+    padding: 0;
+    line-height: 1;
+}
