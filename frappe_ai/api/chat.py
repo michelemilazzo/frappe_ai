@@ -25,7 +25,8 @@ def send_message(message: str, history=None):
         frappe.throw(_("AI API Key not configured. Go to AI Settings to configure."))
 
     message = _inject_url_content(message)
-    messages = _build_messages(settings.get("system_prompt", ""), history or [], message)
+    system_prompt = settings.get("system_prompt", "") + "\n\n" + _frappe_context()
+    messages = _build_messages(system_prompt, history or [], message)
 
     reply = _call_provider(
         provider=provider,
@@ -47,6 +48,46 @@ def _get_settings():
         "model": doc.model or "claude-sonnet-4-6",
         "system_prompt": doc.system_prompt,
     }
+
+
+def _frappe_context() -> str:
+    """Build a Frappe context block: site, user, installed apps, recent doctypes."""
+    try:
+        site = frappe.local.site or ""
+        user = frappe.session.user or ""
+        installed = frappe.get_installed_apps()
+        modules = frappe.db.get_all("Module Def", fields=["name", "app_name"], limit=50)
+        mod_list = ", ".join(f"{m.name}({m.app_name})" for m in modules)
+
+        # Recent doctypes the user can access
+        doctypes = frappe.db.get_all("DocType", filters={"issingle": 0, "istable": 0},
+                                     fields=["name", "module"], limit=80)
+        dt_list = ", ".join(d.name for d in doctypes)
+
+        return (
+            f"## Contesto Frappe\n"
+            f"- Sito: {site}\n"
+            f"- Utente: {user}\n"
+            f"- App installate: {', '.join(installed)}\n"
+            f"- Moduli: {mod_list}\n"
+            f"- DocType disponibili (sample): {dt_list}\n"
+            f"Puoi rispondere a domande su questi dati e aiutare l'utente a navigare il sistema."
+        )
+    except Exception:
+        return ""
+
+
+@frappe.whitelist()
+def query_frappe(doctype: str, filters: str = "{}", fields: str = '["name"]', limit: int = 20):
+    """Execute a safe read-only query on a Frappe DocType and return results."""
+    try:
+        filters_dict = json.loads(filters) if isinstance(filters, str) else filters
+        fields_list = json.loads(fields) if isinstance(fields, str) else fields
+        limit = min(int(limit), 100)
+        results = frappe.db.get_all(doctype, filters=filters_dict, fields=fields_list, limit=limit)
+        return {"results": results, "count": len(results)}
+    except Exception as e:
+        frappe.throw(_("Errore query: {0}").format(str(e)))
 
 
 def _inject_url_content(message: str) -> str:

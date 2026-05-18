@@ -214,6 +214,34 @@
         const message = input.value.trim();
         if (!message && attachedFiles.length === 0) return;
 
+        // /query DocType [{"field":"val"}] ["name","field1"]
+        const queryMatch = message.match(/^\/query\s+(\S+)(?:\s+(\{.*\}))?(?:\s+(\[.*\]))?/i);
+        if (queryMatch) {
+            input.value = "";
+            const [, doctype, filters = "{}", fields = '["name"]'] = queryMatch;
+            appendMessage("user", message);
+            const typingDiv = appendMessage("assistant", "⏳ Query in corso…");
+            frappe.call({
+                method: "frappe_ai.api.chat.query_frappe",
+                args: { doctype, filters, fields, limit: 20 },
+                callback: function (r) {
+                    typingDiv.remove();
+                    if (r.message) {
+                        const rows = r.message.results;
+                        const text = rows.length
+                            ? `**${doctype}** (${rows.length} risultati):\n\`\`\`\n${JSON.stringify(rows, null, 2)}\n\`\`\``
+                            : `Nessun risultato per **${doctype}**.`;
+                        appendMessage("assistant", text);
+                    }
+                },
+                error: function (err) {
+                    typingDiv.remove();
+                    appendMessage("assistant", "⚠️ Errore query.");
+                },
+            });
+            return;
+        }
+
         let fullMessage = message;
         if (attachedFiles.length > 0) {
             const fileBlock = attachedFiles.map(function (f) {
