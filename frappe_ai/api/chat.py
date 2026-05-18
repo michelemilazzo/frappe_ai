@@ -228,11 +228,12 @@ def _call_anthropic(api_key, model, messages):
 
 
 _OPENROUTER_FALLBACKS = [
+    "nvidia/nemotron-3-super-120b-a12b:free",
     "meta-llama/llama-3.3-70b-instruct:free",
-    "meta-llama/llama-3.1-8b-instruct:free",
-    "mistralai/mistral-7b-instruct:free",
-    "qwen/qwen-2.5-7b-instruct:free",
-    "google/gemma-2-9b-it:free",
+    "google/gemma-4-31b-it:free",
+    "nousresearch/hermes-3-llama-3.1-405b:free",
+    "qwen/qwen3-coder:free",
+    "meta-llama/llama-3.2-3b-instruct:free",
 ]
 
 
