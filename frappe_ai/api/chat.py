@@ -82,6 +82,8 @@ def _get_settings():
             result["model"] = doc.model
         if doc.system_prompt:
             result["system_prompt"] = doc.system_prompt
+        if getattr(doc, "ollama_url", None):
+            result["ollama_url"] = doc.ollama_url
 
     return result
 
