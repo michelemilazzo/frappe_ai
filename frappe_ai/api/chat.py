@@ -1,11 +1,18 @@
+import json
 import frappe
 import requests
 from frappe import _
 
 
 @frappe.whitelist()
-def send_message(message: str, history: list | None = None):
+def send_message(message: str, history=None):
     """Send a message to the configured AI provider and return the response."""
+    if isinstance(history, str):
+        try:
+            history = json.loads(history)
+        except (json.JSONDecodeError, TypeError):
+            history = []
+
     settings = _get_settings()
 
     if not settings.get("api_key"):
