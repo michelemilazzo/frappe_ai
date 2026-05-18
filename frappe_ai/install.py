@@ -3,7 +3,6 @@ import frappe
 
 def after_install():
     _create_ai_settings_doctype()
-    frappe.db.commit()
 
 
 def _create_ai_settings_doctype():
