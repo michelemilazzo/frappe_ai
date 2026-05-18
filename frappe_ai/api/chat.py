@@ -227,6 +227,15 @@ def _call_anthropic(api_key, model, messages):
     return resp.json()["content"][0]["text"]
 
 
+_OPENROUTER_FALLBACKS = [
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "google/gemma-3-27b-it:free",
+    "mistralai/mistral-7b-instruct:free",
+    "qwen/qwen3-8b:free",
+    "minimax/minimax-m2.5:free",
+]
+
+
 def _call_openai_compatible(url, api_key, model, messages):
     site_url = frappe.utils.get_url()
     headers = {
@@ -236,19 +245,31 @@ def _call_openai_compatible(url, api_key, model, messages):
         "X-Title": "Frappe AI",
     }
 
-    resp = requests.post(
-        url,
-        json={"model": model, "messages": messages, "max_tokens": 1024},
-        headers=headers,
-        timeout=60,
-    )
+    # Build candidate list: configured model first, then fallbacks (deduped)
+    is_openrouter = "openrouter.ai" in url
+    candidates = [model]
+    if is_openrouter:
+        for fb in _OPENROUTER_FALLBACKS:
+            if fb not in candidates:
+                candidates.append(fb)
 
-    if not resp.ok:
-        frappe.throw(_("AI provider error {0} {1}: {2}").format(resp.status_code, url, resp.text[:300]))
+    last_error = None
+    for candidate in candidates:
+        resp = requests.post(
+            url,
+            json={"model": candidate, "messages": messages, "max_tokens": 1024},
+            headers=headers,
+            timeout=60,
+        )
+        if resp.status_code == 429:
+            last_error = f"429 rate-limited ({candidate})"
+            continue
+        if not resp.ok:
+            frappe.throw(_("AI provider error {0}: {1}").format(resp.status_code, resp.text[:300]))
+        try:
+            data = resp.json()
+        except Exception:
+            frappe.throw(_("AI provider returned invalid response (status {0}): {1}").format(resp.status_code, resp.text[:300]))
+        return data["choices"][0]["message"]["content"]
 
-    try:
-        data = resp.json()
-    except Exception:
-        frappe.throw(_("AI provider returned invalid response (status {0}): {1}").format(resp.status_code, resp.text[:300]))
-
-    return data["choices"][0]["message"]["content"]
+    frappe.throw(_("All AI models are rate-limited. Try again in a few seconds. Last error: {0}").format(last_error))

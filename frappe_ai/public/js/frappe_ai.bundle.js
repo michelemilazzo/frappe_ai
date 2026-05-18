@@ -229,8 +229,11 @@
             return res.json().then(function (data) {
                 if (!res.ok || data.exc) {
                     var msg = '';
-                    try { msg = JSON.parse(data._server_messages || '[]')[0]?.message; } catch(e){}
-                    onError && onError(msg || data.exc || ('HTTP ' + res.status));
+                    try {
+                        var sm = JSON.parse(data._server_messages || '[]');
+                        msg = (typeof sm[0] === 'string') ? JSON.parse(sm[0]).message : sm[0]?.message;
+                    } catch(e) {}
+                    onError && onError(msg || ('HTTP ' + res.status));
                 } else {
                     onSuccess && onSuccess(data);
                 }
