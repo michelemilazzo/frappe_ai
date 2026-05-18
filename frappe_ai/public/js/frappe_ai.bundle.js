@@ -12,10 +12,80 @@
         <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
     </svg>`;
 
+    // CDN libs
+    const PDFJS_URL = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+    const PDFJS_WORKER = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+    const MAMMOTH_URL = "https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js";
+    const XLSX_URL = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+
     let history = [];
     let isOpen = false;
-    let attachedFiles = []; // [{name, content}]
+    let attachedFiles = [];
 
+    // ── Lazy script loader ───────────────────────────────────────────────────
+    const _loaded = {};
+    function loadScript(url) {
+        if (_loaded[url]) return _loaded[url];
+        _loaded[url] = new Promise(function (resolve, reject) {
+            const s = document.createElement("script");
+            s.src = url;
+            s.onload = resolve;
+            s.onerror = reject;
+            document.head.appendChild(s);
+        });
+        return _loaded[url];
+    }
+
+    // ── File readers ─────────────────────────────────────────────────────────
+    async function readPDF(file) {
+        await loadScript(PDFJS_URL);
+        const pdfjsLib = window["pdfjs-dist/build/pdf"];
+        pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER;
+        const arrayBuffer = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        let text = "";
+        for (let i = 1; i <= Math.min(pdf.numPages, 30); i++) {
+            const page = await pdf.getPage(i);
+            const content = await page.getTextContent();
+            text += content.items.map(function (item) { return item.str; }).join(" ") + "\n";
+        }
+        return text.trim().slice(0, 12000);
+    }
+
+    async function readDOCX(file) {
+        await loadScript(MAMMOTH_URL);
+        const arrayBuffer = await file.arrayBuffer();
+        const result = await mammoth.extractRawText({ arrayBuffer });
+        return result.value.slice(0, 12000);
+    }
+
+    async function readXLSX(file) {
+        await loadScript(XLSX_URL);
+        const arrayBuffer = await file.arrayBuffer();
+        const wb = XLSX.read(arrayBuffer, { type: "array" });
+        let text = "";
+        wb.SheetNames.slice(0, 5).forEach(function (name) {
+            const csv = XLSX.utils.sheet_to_csv(wb.Sheets[name]);
+            text += `[Sheet: ${name}]\n${csv}\n\n`;
+        });
+        return text.slice(0, 12000);
+    }
+
+    async function readFileContent(file) {
+        const ext = file.name.split(".").pop().toLowerCase();
+        if (ext === "pdf") return readPDF(file);
+        if (ext === "docx") return readDOCX(file);
+        if (["xlsx", "xls", "ods"].includes(ext)) return readXLSX(file);
+        // Text-based
+        return new Promise(function (resolve, reject) {
+            const r = new FileReader();
+            r.onload = function (e) { resolve(e.target.result.slice(0, 12000)); };
+            r.onerror = reject;
+            r.readAsText(file, "UTF-8");
+        });
+    }
+
+    // ── Init ─────────────────────────────────────────────────────────────────
     function init() {
         if (document.getElementById("frappe-ai-btn")) return;
 
@@ -39,7 +109,7 @@
             <div id="frappe-ai-footer">
                 <button id="frappe-ai-attach" title="Allega file">${ICON_ATTACH}</button>
                 <input type="file" id="frappe-ai-file-input" style="display:none"
-                    accept=".txt,.md,.csv,.json,.py,.js,.html,.xml,.sql,.log,.pdf,.docx,.xlsx" multiple>
+                    accept=".txt,.md,.csv,.json,.py,.js,.html,.xml,.sql,.log,.pdf,.docx,.xlsx,.xls,.ods" multiple>
                 <textarea id="frappe-ai-input" placeholder="Scrivi un messaggio…" rows="1"></textarea>
                 <button id="frappe-ai-send">➤</button>
             </div>
@@ -53,38 +123,46 @@
         });
         document.getElementById("frappe-ai-file-input").addEventListener("change", handleFileSelect);
         document.getElementById("frappe-ai-input").addEventListener("keydown", function (e) {
-            if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                sendMessage();
-            }
+            if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
         });
 
         appendMessage("assistant", "Ciao! Sono l'assistente AI. Come posso aiutarti con Frappe/ERPNext?");
     }
 
-    function handleFileSelect(e) {
+    async function handleFileSelect(e) {
         const files = Array.from(e.target.files);
-        files.forEach(function (file) {
-            const reader = new FileReader();
-            reader.onload = function (ev) {
-                let content = ev.target.result;
-                // For binary reads (PDF etc) content may be base64 or garbled — just use filename
-                if (typeof content !== "string") content = "[file binary]";
-                attachedFiles.push({ name: file.name, content: content.slice(0, 8000) });
-                renderAttachments();
-            };
-            // Read as text for text-based files
-            const ext = file.name.split(".").pop().toLowerCase();
-            if (["pdf"].includes(ext)) {
-                // PDF: attach only filename + signal
-                attachedFiles.push({ name: file.name, content: "[PDF allegato — il contenuto non può essere estratto lato client]" });
-                renderAttachments();
-            } else {
-                reader.readAsText(file, "UTF-8");
+        const attachBtn = document.getElementById("frappe-ai-attach");
+        attachBtn.disabled = true;
+
+        for (const file of files) {
+            const chip = addPendingChip(file.name);
+            try {
+                const content = await readFileContent(file);
+                attachedFiles.push({ name: file.name, content });
+                chip.classList.remove("loading");
+                chip.innerHTML = `📎 ${file.name} <button data-idx="${attachedFiles.length - 1}">×</button>`;
+                chip.querySelector("button").addEventListener("click", function (ev) {
+                    const idx = parseInt(ev.target.dataset.idx);
+                    attachedFiles.splice(idx, 1);
+                    renderAttachments();
+                });
+            } catch (err) {
+                chip.classList.add("error");
+                chip.innerHTML = `⚠️ ${file.name} (errore lettura)`;
             }
-        });
-        // Reset input so same file can be re-selected
+        }
+
+        attachBtn.disabled = false;
         e.target.value = "";
+    }
+
+    function addPendingChip(name) {
+        const container = document.getElementById("frappe-ai-attachments");
+        const chip = document.createElement("span");
+        chip.className = "ai-attachment-chip loading";
+        chip.textContent = `⏳ ${name}`;
+        container.appendChild(chip);
+        return chip;
     }
 
     function renderAttachments() {
@@ -133,10 +211,9 @@
 
     function sendMessage() {
         const input = document.getElementById("frappe-ai-input");
-        let message = input.value.trim();
+        const message = input.value.trim();
         if (!message && attachedFiles.length === 0) return;
 
-        // Append file contents to message
         let fullMessage = message;
         if (attachedFiles.length > 0) {
             const fileBlock = attachedFiles.map(function (f) {
@@ -148,10 +225,8 @@
         input.value = "";
         input.style.height = "38px";
 
-        // Show in chat: message + attachment chips
         const displayText = message + (attachedFiles.length > 0
-            ? "\n" + attachedFiles.map(f => `📎 ${f.name}`).join(", ")
-            : "");
+            ? "\n" + attachedFiles.map(f => `📎 ${f.name}`).join(", ") : "");
         appendMessage("user", displayText);
 
         history.push({ role: "user", content: fullMessage });
@@ -175,7 +250,7 @@
                     history.push({ role: "assistant", content: reply });
                     if (history.length > 20) history = history.slice(-20);
                 } else {
-                    appendMessage("assistant", "⚠️ Nessuna risposta dal provider AI. Controlla la configurazione in AI Settings.");
+                    appendMessage("assistant", "⚠️ Nessuna risposta dal provider AI.");
                 }
             },
             error: function (err) {
