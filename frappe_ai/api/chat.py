@@ -9,6 +9,17 @@ from frappe import _
 _URL_RE = re.compile(r'https?://[^\s\)\]>"\',]+', re.IGNORECASE)
 
 
+# Central defaults — read from common_site_config or hardcoded fallback.
+# All sites share this unless overridden via AI Settings doctype.
+_CENTRAL_DEFAULTS = {
+    "provider": "Ollama",
+    "api_key": None,
+    "model": "qwen2.5:7b",
+    "ollama_url": "http://10.10.0.4:11434",
+    "system_prompt": "",
+}
+
+
 @frappe.whitelist()
 def send_message(message: str, history=None):
     """Send a message to the configured AI provider and return the response."""
@@ -19,9 +30,9 @@ def send_message(message: str, history=None):
             history = []
 
     settings = _get_settings()
-    provider = settings.get("provider", "Claude (Anthropic)")
+    provider = settings.get("provider", "Ollama")
 
-    if provider not in ("Claude Code (locale)", "Claude Code (local)") and not settings.get("api_key"):
+    if provider not in ("Claude Code (locale)", "Claude Code (local)", "Ollama") and not settings.get("api_key"):
         frappe.throw(_("AI API Key not configured. Go to AI Settings to configure."))
 
     message = _inject_url_content(message)
@@ -31,23 +42,48 @@ def send_message(message: str, history=None):
     reply = _call_provider(
         provider=provider,
         api_key=settings.get("api_key"),
-        model=settings.get("model", "claude-sonnet-4-6"),
+        model=settings.get("model"),
         messages=messages,
+        ollama_url=settings.get("ollama_url"),
     )
 
     return {"reply": reply}
 
 
 def _get_settings():
-    if not frappe.db.exists("DocType", "AI Settings"):
-        return {}
-    doc = frappe.get_single("AI Settings")
-    return {
-        "provider": doc.provider,
-        "api_key": doc.get_password("api_key") if doc.api_key else None,
-        "model": doc.model or "claude-sonnet-4-6",
-        "system_prompt": doc.system_prompt,
-    }
+    """
+    Priority: AI Settings doctype (per-site) → common_site_config (per-bench) → central defaults.
+    This allows central configuration without touching each site.
+    """
+    # Start from central defaults
+    result = dict(_CENTRAL_DEFAULTS)
+
+    # Layer 1: common_site_config (bench-wide, set once per bench)
+    conf = frappe.conf
+    if conf.get("frappe_ai_provider"):
+        result["provider"] = conf.frappe_ai_provider
+    if conf.get("frappe_ai_model"):
+        result["model"] = conf.frappe_ai_model
+    if conf.get("frappe_ai_api_key"):
+        result["api_key"] = conf.frappe_ai_api_key
+    if conf.get("frappe_ai_ollama_url"):
+        result["ollama_url"] = conf.frappe_ai_ollama_url
+    if conf.get("frappe_ai_system_prompt"):
+        result["system_prompt"] = conf.frappe_ai_system_prompt
+
+    # Layer 2: AI Settings doctype (per-site override)
+    if frappe.db.exists("DocType", "AI Settings"):
+        doc = frappe.get_single("AI Settings")
+        if doc.provider:
+            result["provider"] = doc.provider
+        if doc.api_key:
+            result["api_key"] = doc.get_password("api_key")
+        if doc.model:
+            result["model"] = doc.model
+        if doc.system_prompt:
+            result["system_prompt"] = doc.system_prompt
+
+    return result
 
 
 def _frappe_context() -> str:
@@ -148,9 +184,12 @@ def _build_messages(system_prompt, history, user_message):
     return messages
 
 
-def _call_provider(provider, api_key, model, messages):
+def _call_provider(provider, api_key, model, messages, ollama_url=None):
     if provider in ("Claude Code (locale)", "Claude Code (local)"):
         return _call_claude_code(messages)
+    elif provider == "Ollama":
+        base = (ollama_url or _CENTRAL_DEFAULTS["ollama_url"]).rstrip("/")
+        return _call_ollama(base, model or _CENTRAL_DEFAULTS["model"], messages)
     elif provider == "Claude (Anthropic)":
         return _call_anthropic(api_key, model, messages)
     elif provider == "OpenAI":
@@ -158,6 +197,35 @@ def _call_provider(provider, api_key, model, messages):
     else:
         # OpenRouter (default)
         return _call_openai_compatible("https://openrouter.ai/api/v1/chat/completions", api_key, model, messages)
+
+
+def _call_ollama(base_url, model, messages):
+    """Call Ollama via its OpenAI-compatible /v1/chat/completions endpoint."""
+    system_content = ""
+    filtered = []
+    for m in messages:
+        if m["role"] == "system":
+            system_content = m["content"]
+        else:
+            filtered.append(m)
+
+    if system_content:
+        filtered = [{"role": "system", "content": system_content}] + filtered
+
+    try:
+        resp = requests.post(
+            f"{base_url}/v1/chat/completions",
+            json={"model": model, "messages": filtered, "stream": False},
+            headers={"Content-Type": "application/json"},
+            timeout=120,
+        )
+    except requests.exceptions.ConnectionError:
+        frappe.throw(_("Ollama non raggiungibile su {0}. Verifica che il servizio sia attivo.").format(base_url))
+
+    if not resp.ok:
+        frappe.throw(_("Ollama error {0}: {1}").format(resp.status_code, resp.text[:300]))
+
+    return resp.json()["choices"][0]["message"]["content"]
 
 
 def _call_claude_code(messages):
