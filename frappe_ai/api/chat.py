@@ -89,6 +89,7 @@ def _call_claude_code(messages):
             capture_output=True,
             text=True,
             timeout=120,
+            stdin=subprocess.DEVNULL,
         )
         if result.returncode != 0:
             frappe.throw(_("Claude Code error: {0}").format(result.stderr[:300]))
