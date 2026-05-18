@@ -1,8 +1,12 @@
 import json
+import re
 import subprocess
 import frappe
 import requests
 from frappe import _
+
+# Matches http/https URLs
+_URL_RE = re.compile(r'https?://[^\s\)\]>"\',]+', re.IGNORECASE)
 
 
 @frappe.whitelist()
@@ -20,6 +24,7 @@ def send_message(message: str, history=None):
     if provider not in ("Claude Code (locale)", "Claude Code (local)") and not settings.get("api_key"):
         frappe.throw(_("AI API Key not configured. Go to AI Settings to configure."))
 
+    message = _inject_url_content(message)
     messages = _build_messages(settings.get("system_prompt", ""), history or [], message)
 
     reply = _call_provider(
@@ -42,6 +47,51 @@ def _get_settings():
         "model": doc.model or "claude-sonnet-4-6",
         "system_prompt": doc.system_prompt,
     }
+
+
+def _inject_url_content(message: str) -> str:
+    """Find URLs in message, fetch their text content and append as context."""
+    urls = list(dict.fromkeys(_URL_RE.findall(message)))  # deduplicated, order preserved
+    if not urls:
+        return message
+
+    fetched = []
+    for url in urls[:3]:  # max 3 URLs per message
+        try:
+            resp = requests.get(url, timeout=10, headers={
+                "User-Agent": "Mozilla/5.0 (compatible; FrappeAI/1.0)",
+                "Accept": "text/html,text/plain,*/*",
+            }, allow_redirects=True)
+            resp.raise_for_status()
+            content_type = resp.headers.get("Content-Type", "")
+            if "json" in content_type:
+                text = resp.text[:8000]
+            elif "html" in content_type or not content_type:
+                text = _html_to_text(resp.text)[:8000]
+            else:
+                text = resp.text[:8000]
+            fetched.append(f"--- Contenuto di {url} ---\n{text}")
+        except Exception as e:
+            fetched.append(f"--- {url} --- (errore: {e})")
+
+    if fetched:
+        message = message + "\n\n" + "\n\n".join(fetched)
+    return message
+
+
+def _html_to_text(html: str) -> str:
+    """Strip HTML tags and collapse whitespace to extract readable text."""
+    # Remove scripts, styles, and head
+    html = re.sub(r'<(script|style|head)[^>]*>[\s\S]*?</\1>', ' ', html, flags=re.IGNORECASE)
+    # Remove all tags
+    text = re.sub(r'<[^>]+>', ' ', html)
+    # Decode common entities
+    text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>') \
+               .replace('&quot;', '"').replace('&#39;', "'").replace('&nbsp;', ' ')
+    # Collapse whitespace
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
 
 
 def _build_messages(system_prompt, history, user_message):
