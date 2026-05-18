@@ -1,0 +1,60 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2026-05-18 12:44:29.912266",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "provider",
+  "api_key",
+  "model",
+  "system_prompt"
+ ],
+ "fields": [
+  {
+   "default": "Claude (Anthropic)",
+   "fieldname": "provider",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Provider",
+   "options": "Claude (Anthropic)\nOpenRouter\nOpenCode.ai\nOpenAI",
+   "reqd": 1
+  },
+  {
+   "fieldname": "api_key",
+   "fieldtype": "Password",
+   "in_list_view": 1,
+   "label": "API Key",
+   "reqd": 1
+  },
+  {
+   "default": "claude-sonnet-4-6",
+   "description": "Claude: claude-sonnet-4-6, claude-haiku-4-5 | OpenRouter: openai/gpt-4o-mini | OpenAI: gpt-4o",
+   "fieldname": "model",
+   "fieldtype": "Data",
+   "label": "Model"
+  },
+  {
+   "default": "You are a helpful assistant integrated into Frappe/ERPNext. Help users navigate the system, write queries, understand documents, and solve problems. Be concise and practical.",
+   "fieldname": "system_prompt",
+   "fieldtype": "Long Text",
+   "label": "System Prompt"
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-05-18 12:44:29.912266",
+ "modified_by": "Administrator",
+ "module": "Frappe AI",
+ "name": "AI Settings",
+ "owner": "Administrator",
+ "permissions": [],
+ "row_format": "Dynamic",
+ "rows_threshold_for_grid_search": 20,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
