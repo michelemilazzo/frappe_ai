@@ -209,6 +209,37 @@
             .replace(/\n/g, "<br>");
     }
 
+    // ── API helper (works on desk AND Press Vue SPA) ─────────────────────────
+    function aiCall(method, args, onSuccess, onError) {
+        var body = {};
+        for (var k in args) {
+            body[k] = (typeof args[k] === 'object' && args[k] !== null)
+                ? JSON.stringify(args[k]) : args[k];
+        }
+        var csrf = (window.csrf_token) || (window.frappe && window.frappe.csrf_token) || '';
+        fetch('/api/method/' + method, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-Frappe-CSRF-Token': csrf,
+            },
+            body: new URLSearchParams(body).toString(),
+            credentials: 'same-origin',
+        }).then(function (res) {
+            return res.json().then(function (data) {
+                if (!res.ok || data.exc) {
+                    var msg = '';
+                    try { msg = JSON.parse(data._server_messages || '[]')[0]?.message; } catch(e){}
+                    onError && onError(msg || data.exc || ('HTTP ' + res.status));
+                } else {
+                    onSuccess && onSuccess(data);
+                }
+            });
+        }).catch(function (err) {
+            onError && onError(err.message || 'Errore di connessione.');
+        });
+    }
+
     function sendMessage() {
         const input = document.getElementById("frappe-ai-input");
         const message = input.value.trim();
@@ -221,24 +252,19 @@
             const [, doctype, filters = "{}", fields = '["name"]'] = queryMatch;
             appendMessage("user", message);
             const typingDiv = appendMessage("assistant", "⏳ Query in corso…");
-            frappe.call({
-                method: "frappe_ai.api.chat.query_frappe",
-                args: { doctype, filters, fields, limit: 20 },
-                callback: function (r) {
+            aiCall(
+                "frappe_ai.api.chat.query_frappe",
+                { doctype, filters, fields, limit: 20 },
+                function (r) {
                     typingDiv.remove();
-                    if (r.message) {
-                        const rows = r.message.results;
-                        const text = rows.length
-                            ? `**${doctype}** (${rows.length} risultati):\n\`\`\`\n${JSON.stringify(rows, null, 2)}\n\`\`\``
-                            : `Nessun risultato per **${doctype}**.`;
-                        appendMessage("assistant", text);
-                    }
+                    const rows = r.message && r.message.results;
+                    const text = rows && rows.length
+                        ? `**${doctype}** (${rows.length} risultati):\n\`\`\`\n${JSON.stringify(rows, null, 2)}\n\`\`\``
+                        : `Nessun risultato per **${doctype}**.`;
+                    appendMessage("assistant", text);
                 },
-                error: function (err) {
-                    typingDiv.remove();
-                    appendMessage("assistant", "⚠️ Errore query.");
-                },
-            });
+                function () { typingDiv.remove(); appendMessage("assistant", "⚠️ Errore query."); }
+            );
             return;
         }
 
@@ -266,10 +292,10 @@
         const typingDiv = appendMessage("assistant", "…");
         typingDiv.classList.add("typing");
 
-        frappe.call({
-            method: "frappe_ai.api.chat.send_message",
-            args: { message: fullMessage, history: history.slice(-10) },
-            callback: function (r) {
+        aiCall(
+            "frappe_ai.api.chat.send_message",
+            { message: fullMessage, history: history.slice(-10) },
+            function (r) {
                 typingDiv.remove();
                 sendBtn.disabled = false;
                 if (r.message && r.message.reply) {
@@ -281,15 +307,12 @@
                     appendMessage("assistant", "⚠️ Nessuna risposta dal provider AI.");
                 }
             },
-            error: function (err) {
+            function (errMsg) {
                 typingDiv.remove();
                 sendBtn.disabled = false;
-                const msg = err?.responseJSON?._server_messages
-                    ? JSON.parse(err.responseJSON._server_messages)[0]?.message
-                    : "Errore di connessione.";
-                appendMessage("assistant", "⚠️ " + (msg || "Errore sconosciuto."));
-            },
-        });
+                appendMessage("assistant", "⚠️ " + (errMsg || "Errore sconosciuto."));
+            }
+        );
     }
 
     document.addEventListener("input", function (e) {
