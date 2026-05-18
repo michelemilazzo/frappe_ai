@@ -1,4 +1,5 @@
 import json
+import subprocess
 import frappe
 import requests
 from frappe import _
@@ -14,15 +15,16 @@ def send_message(message: str, history=None):
             history = []
 
     settings = _get_settings()
+    provider = settings.get("provider", "Claude (Anthropic)")
 
-    if not settings.get("api_key"):
+    if provider not in ("Claude Code (locale)", "Claude Code (local)") and not settings.get("api_key"):
         frappe.throw(_("AI API Key not configured. Go to AI Settings to configure."))
 
     messages = _build_messages(settings.get("system_prompt", ""), history or [], message)
 
     reply = _call_provider(
-        provider=settings.get("provider", "Claude (Anthropic)"),
-        api_key=settings["api_key"],
+        provider=provider,
+        api_key=settings.get("api_key"),
         model=settings.get("model", "claude-sonnet-4-6"),
         messages=messages,
     )
@@ -56,7 +58,9 @@ def _build_messages(system_prompt, history, user_message):
 
 
 def _call_provider(provider, api_key, model, messages):
-    if provider == "Claude (Anthropic)":
+    if provider in ("Claude Code (locale)", "Claude Code (local)"):
+        return _call_claude_code(messages)
+    elif provider == "Claude (Anthropic)":
         return _call_anthropic(api_key, model, messages)
     elif provider == "OpenAI":
         return _call_openai_compatible("https://api.openai.com/v1/chat/completions", api_key, model, messages)
@@ -65,8 +69,37 @@ def _call_provider(provider, api_key, model, messages):
         return _call_openai_compatible("https://openrouter.ai/api/v1/chat/completions", api_key, model, messages)
 
 
+def _call_claude_code(messages):
+    """Call Claude via the local claude CLI (no API key required)."""
+    # Build the prompt: system + conversation history + current message
+    parts = []
+    for m in messages:
+        if m["role"] == "system":
+            parts.append(f"[System: {m['content']}]")
+        elif m["role"] == "user":
+            parts.append(f"User: {m['content']}")
+        elif m["role"] == "assistant":
+            parts.append(f"Assistant: {m['content']}")
+
+    prompt = "\n".join(parts)
+
+    try:
+        result = subprocess.run(
+            ["/usr/bin/claude", "-p", prompt],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            frappe.throw(_("Claude Code error: {0}").format(result.stderr[:300]))
+        return result.stdout.strip()
+    except subprocess.TimeoutExpired:
+        frappe.throw(_("Claude Code timed out after 120 seconds."))
+    except FileNotFoundError:
+        frappe.throw(_("Claude Code CLI not found at /usr/bin/claude."))
+
+
 def _call_anthropic(api_key, model, messages):
-    # Anthropic uses a different format: system is separate, no system in messages list
     system_content = ""
     filtered = []
     for m in messages:

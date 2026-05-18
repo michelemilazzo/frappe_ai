@@ -19,7 +19,7 @@ def _create_ai_settings_doctype():
                 "fieldname": "provider",
                 "fieldtype": "Select",
                 "label": "Provider",
-                "options": "Claude (Anthropic)\nOpenRouter\nOpenAI",
+                "options": "Claude Code (locale)\nClaude (Anthropic)\nOpenRouter\nOpenAI",
                 "default": "Claude (Anthropic)",
                 "reqd": 1,
             },

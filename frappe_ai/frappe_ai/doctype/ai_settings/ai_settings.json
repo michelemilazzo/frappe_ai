@@ -18,7 +18,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Provider",
-   "options": "Claude (Anthropic)\nOpenRouter\nOpenAI",
+   "options": "Claude Code (locale)\nClaude (Anthropic)\nOpenRouter\nOpenAI",
    "reqd": 1
   },
   {
