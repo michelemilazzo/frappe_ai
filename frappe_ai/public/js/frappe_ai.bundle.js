@@ -299,11 +299,11 @@
         }
     });
 
-    if (typeof frappe !== "undefined" && frappe.ui) {
-        init();
-    } else {
+    if (document.readyState === "loading") {
         document.addEventListener("DOMContentLoaded", function () {
-            setTimeout(init, 1500);
+            setTimeout(init, 800);
         });
+    } else {
+        setTimeout(init, 800);
     }
 })();
