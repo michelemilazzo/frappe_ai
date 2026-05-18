@@ -229,10 +229,10 @@ def _call_anthropic(api_key, model, messages):
 
 _OPENROUTER_FALLBACKS = [
     "meta-llama/llama-3.3-70b-instruct:free",
-    "google/gemma-3-27b-it:free",
+    "meta-llama/llama-3.1-8b-instruct:free",
     "mistralai/mistral-7b-instruct:free",
-    "qwen/qwen3-8b:free",
-    "minimax/minimax-m2.5:free",
+    "qwen/qwen-2.5-7b-instruct:free",
+    "google/gemma-2-9b-it:free",
 ]
 
 
@@ -261,8 +261,8 @@ def _call_openai_compatible(url, api_key, model, messages):
             headers=headers,
             timeout=60,
         )
-        if resp.status_code == 429:
-            last_error = f"429 rate-limited ({candidate})"
+        if resp.status_code in (429, 404):
+            last_error = f"{resp.status_code} ({candidate})"
             continue
         if not resp.ok:
             frappe.throw(_("AI provider error {0}: {1}").format(resp.status_code, resp.text[:300]))
