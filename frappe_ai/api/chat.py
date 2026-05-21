@@ -2,22 +2,27 @@ import frappe
 import requests
 from frappe import _
 
+OLLAMA_BASE_URL = "http://10.10.0.4:11434"
+OLLAMA_DEFAULT_MODEL = "qwen2.5:7b"
+
 
 @frappe.whitelist()
 def send_message(message: str, history: list | None = None):
     """Send a message to the configured AI provider and return the response."""
     settings = _get_settings()
+    provider = settings.get("provider", "Ollama (Local)")
 
-    if not settings.get("api_key"):
+    if provider != "Ollama (Local)" and not settings.get("api_key"):
         frappe.throw(_("AI API Key not configured. Go to AI Settings to configure."))
 
     messages = _build_messages(settings.get("system_prompt", ""), history or [], message)
 
     reply = _call_provider(
-        provider=settings.get("provider", "Claude (Anthropic)"),
-        api_key=settings["api_key"],
-        model=settings.get("model", "claude-sonnet-4-6"),
+        provider=provider,
+        api_key=settings.get("api_key", ""),
+        model=settings.get("model", OLLAMA_DEFAULT_MODEL),
         messages=messages,
+        ollama_base_url=settings.get("ollama_base_url", OLLAMA_BASE_URL),
     )
 
     return {"reply": reply}
@@ -25,12 +30,13 @@ def send_message(message: str, history: list | None = None):
 
 def _get_settings():
     if not frappe.db.exists("DocType", "AI Settings"):
-        return {}
+        return {"provider": "Ollama (Local)", "model": OLLAMA_DEFAULT_MODEL}
     doc = frappe.get_single("AI Settings")
     return {
-        "provider": doc.provider,
+        "provider": doc.provider or "Ollama (Local)",
         "api_key": doc.get_password("api_key") if doc.api_key else None,
-        "model": doc.model or "claude-sonnet-4-6",
+        "model": doc.model or OLLAMA_DEFAULT_MODEL,
+        "ollama_base_url": getattr(doc, "ollama_base_url", None) or OLLAMA_BASE_URL,
         "system_prompt": doc.system_prompt,
     }
 
@@ -48,8 +54,10 @@ def _build_messages(system_prompt, history, user_message):
     return messages
 
 
-def _call_provider(provider, api_key, model, messages):
-    if provider == "Claude (Anthropic)":
+def _call_provider(provider, api_key, model, messages, ollama_base_url=None):
+    if provider == "Ollama (Local)":
+        return _call_ollama(model or OLLAMA_DEFAULT_MODEL, messages, ollama_base_url or OLLAMA_BASE_URL)
+    elif provider == "Claude (Anthropic)":
         return _call_anthropic(api_key, model, messages)
     elif provider == "OpenCode.ai":
         return _call_openai_compatible("https://api.opencode.ai/v1/chat/completions", api_key, model, messages)
@@ -95,6 +103,20 @@ def _call_anthropic(api_key, model, messages):
         frappe.throw(_("Anthropic API error: {0}").format(resp.text[:300]))
 
     return resp.json()["content"][0]["text"]
+
+
+def _call_ollama(model, messages, base_url=None):
+    """Call local Ollama via its OpenAI-compatible API — no auth required."""
+    url = f"{base_url or OLLAMA_BASE_URL}/v1/chat/completions"
+    resp = requests.post(
+        url,
+        json={"model": model, "messages": messages, "max_tokens": 1024},
+        headers={"Content-Type": "application/json"},
+        timeout=120,
+    )
+    if not resp.ok:
+        frappe.throw(_("Ollama error: {0}").format(resp.text[:300]))
+    return resp.json()["choices"][0]["message"]["content"]
 
 
 def _call_openai_compatible(url, api_key, model, messages):
