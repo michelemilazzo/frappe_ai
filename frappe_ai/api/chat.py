@@ -167,9 +167,6 @@ def send_message(message: str, history=None, agent_mode: int = 0):
     settings = _get_settings()
     provider = settings.get("provider", "Ollama")
 
-    if provider not in ("Claude Code (locale)", "Claude Code (local)", "Ollama") and not settings.get("api_key"):
-        frappe.throw(_("AI API Key not configured. Go to AI Settings to configure."))
-
     message = _inject_url_content(message)
 
     # Build system prompt — extend with agent instructions when enabled
@@ -226,13 +223,12 @@ Regole:
 
 def _get_settings():
     """
-    Priority: AI Settings doctype (per-site) → common_site_config (per-bench) → central defaults.
-    This allows central configuration without touching each site.
+    Settings derived automatically from central defaults + common_site_config.
+    No UI configuration required — everything comes from ai-mmos-core (Ollama).
     """
-    # Start from central defaults
     result = dict(_CENTRAL_DEFAULTS)
 
-    # Layer 1: common_site_config (bench-wide, set once per bench)
+    # Optional overrides via common_site_config.json (bench-wide)
     conf = frappe.conf
     if conf.get("frappe_ai_provider"):
         result["provider"] = conf.frappe_ai_provider
@@ -245,19 +241,26 @@ def _get_settings():
     if conf.get("frappe_ai_system_prompt"):
         result["system_prompt"] = conf.frappe_ai_system_prompt
 
-    # Layer 2: AI Settings doctype (per-site override)
-    if frappe.db.exists("DocType", "AI Settings"):
-        doc = frappe.get_single("AI Settings")
-        if doc.provider:
-            result["provider"] = doc.provider
-        if doc.api_key:
-            result["api_key"] = doc.get_password("api_key")
-        if doc.model:
-            result["model"] = doc.model
-        if doc.system_prompt:
-            result["system_prompt"] = doc.system_prompt
-        if getattr(doc, "ollama_url", None):
-            result["ollama_url"] = doc.ollama_url
+    # Optional per-site override via AI Settings doctype — silently ignored if missing/empty
+    try:
+        if frappe.db.exists("DocType", "AI Settings"):
+            doc = frappe.get_single("AI Settings")
+            if doc.provider:
+                result["provider"] = doc.provider
+            if doc.model:
+                result["model"] = doc.model
+            if doc.system_prompt:
+                result["system_prompt"] = doc.system_prompt
+            if getattr(doc, "ollama_url", None):
+                result["ollama_url"] = doc.ollama_url
+            # api_key only if explicitly saved — never raise on missing password
+            try:
+                if doc.api_key:
+                    result["api_key"] = doc.get_password("api_key")
+            except Exception:
+                pass
+    except Exception:
+        pass
 
     return result
 
