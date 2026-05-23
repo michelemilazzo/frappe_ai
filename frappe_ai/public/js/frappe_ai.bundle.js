@@ -21,6 +21,9 @@
     let history = [];
     let isOpen = false;
     let attachedFiles = [];
+    let agentMode = false;
+
+    const ICON_AGENT = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>`;
 
     // ── Lazy script loader ───────────────────────────────────────────────────
     const _loaded = {};
@@ -102,7 +105,14 @@
         panel.innerHTML = `
             <div id="frappe-ai-header">
                 <span>${ICON_CHAT} AI Assistant</span>
-                <button id="frappe-ai-close" title="Close">${ICON_CLOSE}</button>
+                <div style="display:flex;align-items:center;gap:6px">
+                    <label id="frappe-ai-agent-label" title="Agent Mode: l'AI può scrivere file e eseguire comandi sul server (solo Administrator)" style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;user-select:none">
+                        ${ICON_AGENT}
+                        <span>Agent</span>
+                        <input type="checkbox" id="frappe-ai-agent-toggle" style="margin:0;cursor:pointer">
+                    </label>
+                    <button id="frappe-ai-close" title="Close">${ICON_CLOSE}</button>
+                </div>
             </div>
             <div id="frappe-ai-messages"></div>
             <div id="frappe-ai-attachments"></div>
@@ -124,6 +134,14 @@
         document.getElementById("frappe-ai-file-input").addEventListener("change", handleFileSelect);
         document.getElementById("frappe-ai-input").addEventListener("keydown", function (e) {
             if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+        });
+        document.getElementById("frappe-ai-agent-toggle").addEventListener("change", function (e) {
+            agentMode = e.target.checked;
+            const label = document.getElementById("frappe-ai-agent-label");
+            label.style.color = agentMode ? "#f97316" : "";
+            if (agentMode) {
+                appendMessage("assistant", "⚡ **Agent Mode attivo.** Posso scrivere file e eseguire comandi sul server. Dimmi cosa fare.");
+            }
         });
 
         appendMessage("assistant", "Ciao! Sono l'assistente AI. Come posso aiutarti con Frappe/ERPNext?");
@@ -297,7 +315,7 @@
 
         aiCall(
             "frappe_ai.api.chat.send_message",
-            { message: fullMessage, history: history.slice(-10) },
+            { message: fullMessage, history: history.slice(-10), agent_mode: agentMode ? 1 : 0 },
             function (r) {
                 typingDiv.remove();
                 sendBtn.disabled = false;
@@ -306,6 +324,16 @@
                     appendMessage("assistant", reply);
                     history.push({ role: "assistant", content: reply });
                     if (history.length > 20) history = history.slice(-20);
+                    // Show action results summary
+                    const actions = r.message.actions || [];
+                    if (actions.length > 0) {
+                        const ok = actions.filter(a => a.ok !== false).length;
+                        const fail = actions.length - ok;
+                        const summary = fail > 0
+                            ? `⚠️ ${ok} azioni completate, ${fail} errori`
+                            : `✅ ${ok} azione/i eseguita/e sul server`;
+                        appendMessage("system", summary);
+                    }
                 } else {
                     appendMessage("assistant", "⚠️ Nessuna risposta dal provider AI.");
                 }

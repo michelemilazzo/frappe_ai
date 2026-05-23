@@ -66,6 +66,9 @@
     line-height: 1;
 }
 #frappe-ai-close:hover { opacity: 1; }
+#frappe-ai-agent-label { color: rgba(255,255,255,0.75); transition: color 0.2s; }
+#frappe-ai-agent-label:hover { color: #fff; }
+#frappe-ai-agent-toggle { accent-color: #f97316; width: 14px; height: 14px; }
 
 #frappe-ai-messages {
     flex: 1;
@@ -107,6 +110,10 @@
     margin: 6px 0 0;
 }
 .ai-msg.typing { opacity: 0.6; font-style: italic; }
+.ai-msg.system {
+    background: #fef3c7; color: #92400e; font-size: 11px; padding: 4px 10px;
+    border-radius: 4px; text-align: center; margin: 4px 0; border: none;
+}
 
 #frappe-ai-footer {
     padding: 12px;

@@ -1,12 +1,28 @@
 import json
+import os
 import re
 import subprocess
+import tempfile
 import frappe
 import requests
 from frappe import _
+from pathlib import Path
 
 # Matches http/https URLs
 _URL_RE = re.compile(r'https?://[^\s\)\]>"\',]+', re.IGNORECASE)
+
+# Action block regex: ```action\n{...}\n```
+_ACTION_RE = re.compile(r'```action\s*\n(\{[\s\S]*?\})\s*\n```', re.IGNORECASE)
+
+# Users allowed to execute server actions
+_ACTION_ALLOWED_USERS = {"Administrator", "admin@onekeyco.com"}
+
+# Safe shell commands prefix whitelist
+_SAFE_SHELL_PREFIXES = (
+    "bench ", "python ", "python3 ", "pip ", "ls ", "cat ", "grep ",
+    "find ", "echo ", "mkdir ", "cp ", "mv ", "rm ", "git ", "cd ",
+    "yarn ", "npm ", "node ",
+)
 
 
 # Central defaults — read from common_site_config or hardcoded fallback.
@@ -20,8 +36,127 @@ _CENTRAL_DEFAULTS = {
 }
 
 
+def _check_action_permission():
+    if frappe.session.user not in _ACTION_ALLOWED_USERS:
+        frappe.throw(_("Azione non consentita. Riservata ad Administrator e admin@onekeyco.com."))
+
+
+def _bench_root() -> Path:
+    return Path(frappe.utils.get_bench_path())
+
+
+def _safe_path(path: str) -> Path:
+    """Resolve path, restrict to bench or /tmp."""
+    p = Path(path).expanduser()
+    if not p.is_absolute():
+        p = _bench_root() / p
+    p = p.resolve()
+    bench = _bench_root().resolve()
+    if not (str(p).startswith(str(bench)) or str(p).startswith("/tmp")):
+        frappe.throw(_("Path non consentito: {0}").format(path))
+    return p
+
+
 @frappe.whitelist()
-def send_message(message: str, history=None):
+def execute_action(action_type: str, params: str = "{}"):
+    """Execute a real server action. Reserved for Administrator and admin@onekeyco.com."""
+    _check_action_permission()
+    p = json.loads(params) if isinstance(params, str) else (params or {})
+
+    if action_type == "write_file":
+        path = _safe_path(p["path"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(p["content"], encoding="utf-8")
+        return {"ok": True, "path": str(path), "bytes": len(p["content"])}
+
+    elif action_type == "read_file":
+        path = _safe_path(p["path"])
+        if not path.exists():
+            frappe.throw(_("File non trovato: {0}").format(p["path"]))
+        content = path.read_text(encoding="utf-8", errors="replace")
+        return {"ok": True, "path": str(path), "content": content[:50000]}
+
+    elif action_type == "list_files":
+        path = _safe_path(p.get("path", "."))
+        if not path.is_dir():
+            frappe.throw(_("Directory non trovata: {0}").format(p.get("path")))
+        items = [{"name": f.name, "type": "dir" if f.is_dir() else "file", "size": f.stat().st_size if f.is_file() else 0}
+                 for f in sorted(path.iterdir())[:200]]
+        return {"ok": True, "path": str(path), "items": items}
+
+    elif action_type == "run_python":
+        code = p.get("code", "")
+        # Execute in a subprocess with bench python
+        bench = _bench_root()
+        py = bench / "env" / "bin" / "python"
+        if not py.exists():
+            py = Path("python3")
+        with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False) as f:
+            f.write(code)
+            tmp = f.name
+        try:
+            result = subprocess.run(
+                [str(py), tmp],
+                capture_output=True, text=True, timeout=30,
+                cwd=str(bench),
+            )
+        finally:
+            os.unlink(tmp)
+        return {"ok": result.returncode == 0, "stdout": result.stdout[:10000], "stderr": result.stderr[:3000], "rc": result.returncode}
+
+    elif action_type == "run_shell":
+        cmd = p.get("cmd", "")
+        if not any(cmd.lstrip().startswith(pfx) for pfx in _SAFE_SHELL_PREFIXES):
+            frappe.throw(_("Comando non consentito: {0}").format(cmd.split()[0] if cmd else ""))
+        result = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True, timeout=60,
+            cwd=str(_bench_root()),
+        )
+        return {"ok": result.returncode == 0, "stdout": result.stdout[:10000], "stderr": result.stderr[:3000], "rc": result.returncode}
+
+    elif action_type == "bench_cmd":
+        site = p.get("site") or frappe.local.site
+        bench_cmd = p.get("cmd", "")
+        full = f"bench --site {site} {bench_cmd}"
+        result = subprocess.run(
+            full, shell=True, capture_output=True, text=True, timeout=120,
+            cwd=str(_bench_root()),
+        )
+        return {"ok": result.returncode == 0, "stdout": result.stdout[:10000], "stderr": result.stderr[:3000]}
+
+    else:
+        frappe.throw(_("Azione non supportata: {0}").format(action_type))
+
+
+def _auto_execute_actions(reply: str) -> tuple[str, list[dict]]:
+    """Parse and execute ```action {...}``` blocks from AI reply. Returns (cleaned_reply, results)."""
+    if frappe.session.user not in _ACTION_ALLOWED_USERS:
+        return reply, []
+
+    results = []
+    def _run_block(m):
+        try:
+            action = json.loads(m.group(1))
+            atype = action.pop("action", "write_file")
+            res = execute_action(atype, json.dumps(action))
+            results.append({"action": atype, **res})
+            status = "✅ eseguito" if res.get("ok") else "❌ errore"
+            if atype == "write_file":
+                return f"`{res.get('path')}` — {status} ({res.get('bytes', 0)} bytes)"
+            elif atype in ("run_python", "run_shell", "bench_cmd"):
+                out = (res.get("stdout") or "").strip()[:500]
+                return f"{status}\n```\n{out}\n```" if out else status
+            return status
+        except Exception as e:
+            results.append({"error": str(e)})
+            return f"❌ errore azione: {e}"
+
+    cleaned = _ACTION_RE.sub(_run_block, reply)
+    return cleaned, results
+
+
+@frappe.whitelist()
+def send_message(message: str, history=None, agent_mode: int = 0):
     """Send a message to the configured AI provider and return the response."""
     if isinstance(history, str):
         try:
@@ -36,8 +171,14 @@ def send_message(message: str, history=None):
         frappe.throw(_("AI API Key not configured. Go to AI Settings to configure."))
 
     message = _inject_url_content(message)
-    system_prompt = settings.get("system_prompt", "") + "\n\n" + _frappe_context()
-    messages = _build_messages(system_prompt, history or [], message)
+
+    # Build system prompt — extend with agent instructions when enabled
+    base_prompt = settings.get("system_prompt", "") + "\n\n" + _frappe_context()
+    is_agent = int(agent_mode) == 1 and frappe.session.user in _ACTION_ALLOWED_USERS
+    if is_agent:
+        base_prompt += "\n\n" + _agent_instructions()
+
+    messages = _build_messages(base_prompt, history or [], message)
 
     reply = _call_provider(
         provider=provider,
@@ -47,7 +188,40 @@ def send_message(message: str, history=None):
         ollama_url=settings.get("ollama_url"),
     )
 
-    return {"reply": reply}
+    actions_executed = []
+    if is_agent:
+        reply, actions_executed = _auto_execute_actions(reply)
+
+    return {"reply": reply, "actions": actions_executed, "agent_mode": is_agent}
+
+
+def _agent_instructions() -> str:
+    bench = str(_bench_root())
+    site = frappe.local.site or ""
+    return f"""## Modalità Agent — ESECUZIONE REALE
+Puoi scrivere e modificare file direttamente sul server.
+Per eseguire un'azione includi un blocco ```action``` nel tuo messaggio nel formato JSON:
+
+```action
+{{"action": "write_file", "path": "apps/myapp/myapp/mymodule.py", "content": "# contenuto del file\\n..."}}
+```
+
+Azioni disponibili:
+- **write_file**: `{{"action":"write_file","path":"<relativo a bench o assoluto>","content":"<testo>"}}`
+- **read_file**: `{{"action":"read_file","path":"<path>"}}`
+- **list_files**: `{{"action":"list_files","path":"<dir>"}}`
+- **run_python**: `{{"action":"run_python","code":"<codice python>"}}`
+- **run_shell**: `{{"action":"run_shell","cmd":"<comando>"}}` (solo comandi: bench, python, pip, ls, cat, grep, find, git, yarn, npm)
+- **bench_cmd**: `{{"action":"bench_cmd","site":"{site}","cmd":"<sottocomando bench>"}}`
+
+Bench path: `{bench}`
+Sito corrente: `{site}`
+
+Regole:
+- Usa path relativi rispetto al bench quando possibile
+- Prima di scrivere un file mostra cosa farai
+- Puoi includere più blocchi ```action``` in una risposta
+- I risultati vengono mostrati all'utente automaticamente"""
 
 
 def _get_settings():
