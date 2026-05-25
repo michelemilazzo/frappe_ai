@@ -1,6 +1,6 @@
 # Frappe AI
 
-AI chat assistant for Frappe v15+ — powered by OpenCode.ai / OpenRouter.
+AI operations assistant for Frappe v15+ with chat + agent execution.
 
 ## Installation
 
@@ -15,12 +15,26 @@ bench install-app frappe_ai
 
 ## Configuration
 
-After installation go to **AI Settings** and configure:
+Default mode is API-key free via local provider:
 
-- **Provider**: OpenRouter (recommended) or OpenCode.ai
-- **API Key**: Your API key from the provider
-- **Model**: e.g. `openai/gpt-4o-mini`, `anthropic/claude-3-haiku`
-- **System Prompt**: Context for the assistant
+- **Provider**: `Ollama` (default) or `Claude Code (local)`
+- **Model**: default `qwen2.5:7b`
+- **Ollama URL**: default `http://10.10.0.4:11434`
+
+Optional overrides (bench-wide) in `common_site_config.json`:
+
+- `frappe_ai_provider`
+- `frappe_ai_model`
+- `frappe_ai_ollama_url`
+- `frappe_ai_system_prompt`
+
+## Agent Mode
+
+Agent mode can execute real actions from the chat UI for allowed users:
+
+- File actions: `write_file`, `read_file`, `list_files`
+- Runtime actions: `run_python`, `run_shell`, `bench_cmd`
+- Business actions: `create_customer`, `create_web_page`, `create_webshop_item`, `translate_doc_fields`, `generate_contract`
 
 ## API Usage
 

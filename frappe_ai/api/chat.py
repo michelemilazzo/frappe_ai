@@ -20,7 +20,7 @@ _ACTION_ALLOWED_USERS = {"Administrator", "admin@onekeyco.com"}
 # Safe shell commands prefix whitelist
 _SAFE_SHELL_PREFIXES = (
     "bench ", "python ", "python3 ", "pip ", "ls ", "cat ", "grep ",
-    "find ", "echo ", "mkdir ", "cp ", "mv ", "rm ", "git ", "cd ",
+    "find ", "echo ", "mkdir ", "cp ", "mv ", "git ", "cd ",
     "yarn ", "npm ", "node ",
 )
 
@@ -55,6 +55,159 @@ def _safe_path(path: str) -> Path:
     if not (str(p).startswith(str(bench)) or str(p).startswith("/tmp")):
         frappe.throw(_("Path non consentito: {0}").format(path))
     return p
+
+
+def _coerce_dict(raw):
+    if isinstance(raw, str):
+        return json.loads(raw or "{}")
+    return raw or {}
+
+
+def _create_customer(payload: dict) -> dict:
+    data = _coerce_dict(payload)
+    customer_name = data.get("customer_name") or data.get("name")
+    if not customer_name:
+        frappe.throw(_("customer_name obbligatorio"))
+    customer = frappe.new_doc("Customer")
+    customer.customer_name = customer_name
+    if data.get("customer_type"):
+        customer.customer_type = data.get("customer_type")
+    if data.get("customer_group"):
+        customer.customer_group = data.get("customer_group")
+    if data.get("territory"):
+        customer.territory = data.get("territory")
+    if data.get("tax_id"):
+        customer.tax_id = data.get("tax_id")
+    customer.insert(ignore_permissions=True)
+
+    if data.get("email_id") or data.get("phone"):
+        contact = frappe.new_doc("Contact")
+        contact.first_name = customer_name
+        contact.email_id = data.get("email_id")
+        contact.phone = data.get("phone")
+        contact.append("links", {"link_doctype": "Customer", "link_name": customer.name})
+        contact.insert(ignore_permissions=True)
+
+    if data.get("address_line1") or data.get("city"):
+        address = frappe.new_doc("Address")
+        address.address_title = customer_name
+        address.address_line1 = data.get("address_line1")
+        address.address_line2 = data.get("address_line2")
+        address.city = data.get("city")
+        address.pincode = data.get("pincode")
+        address.country = data.get("country")
+        address.append("links", {"link_doctype": "Customer", "link_name": customer.name})
+        address.insert(ignore_permissions=True)
+
+    frappe.db.commit()
+    return {"ok": True, "customer": customer.name}
+
+
+def _create_web_page(payload: dict) -> dict:
+    data = _coerce_dict(payload)
+    title = data.get("title")
+    route = data.get("route")
+    html = data.get("html")
+    if not title or not route or not html:
+        frappe.throw(_("title, route, html obbligatori"))
+    existing = frappe.db.get_value("Web Page", {"route": route.strip("/")}, "name")
+    if existing:
+        doc = frappe.get_doc("Web Page", existing)
+    else:
+        doc = frappe.new_doc("Web Page")
+    doc.title = title
+    doc.route = route.strip("/")
+    doc.content_type = "HTML"
+    doc.main_section = html
+    doc.published = int(bool(data.get("published", 1)))
+    doc.insert(ignore_permissions=True) if doc.is_new() else doc.save(ignore_permissions=True)
+    frappe.db.commit()
+    return {"ok": True, "web_page": doc.name, "route": doc.route}
+
+
+def _create_webshop_item(payload: dict) -> dict:
+    data = _coerce_dict(payload)
+    item_code = data.get("item_code")
+    item_name = data.get("item_name")
+    if not item_code or not item_name:
+        frappe.throw(_("item_code e item_name obbligatori"))
+    if frappe.db.exists("Item", item_code):
+        item = frappe.get_doc("Item", item_code)
+    else:
+        item = frappe.new_doc("Item")
+        item.item_code = item_code
+    item.item_name = item_name
+    item.item_group = data.get("item_group") or item.item_group or "All Item Groups"
+    item.stock_uom = data.get("stock_uom") or item.stock_uom or "Nos"
+    item.is_stock_item = int(bool(data.get("is_stock_item", 0)))
+    item.standard_rate = float(data.get("standard_rate") or 0)
+    item.description = data.get("description") or item.description
+    item.published_in_website = int(bool(data.get("published_in_website", 1)))
+    item.website_warehouse = data.get("website_warehouse") or item.website_warehouse
+    item.insert(ignore_permissions=True) if item.is_new() else item.save(ignore_permissions=True)
+    frappe.db.commit()
+    return {"ok": True, "item": item.name}
+
+
+def _translate_doc_fields(payload: dict) -> dict:
+    data = _coerce_dict(payload)
+    doctype = data.get("doctype")
+    name = data.get("name")
+    fields = data.get("fields") or []
+    target_lang = data.get("target_lang", "en")
+    if not doctype or not name or not isinstance(fields, list) or not fields:
+        frappe.throw(_("doctype, name e fields[] obbligatori"))
+    doc = frappe.get_doc(doctype, name)
+    updates = {}
+    for fieldname in fields:
+        value = (doc.get(fieldname) or "").strip()
+        if not value:
+            continue
+        translated = _call_provider(
+            provider="Ollama",
+            api_key=None,
+            model=_CENTRAL_DEFAULTS["model"],
+            messages=[
+                {"role": "system", "content": "Traduci in modo professionale e fedele."},
+                {"role": "user", "content": f"Traduci in {target_lang}: {value}"},
+            ],
+            ollama_url=_CENTRAL_DEFAULTS["ollama_url"],
+        )
+        target_field = f"{fieldname}_{target_lang}"
+        if target_field in (doc.meta.get_valid_columns() or []):
+            doc.set(target_field, translated.strip())
+            updates[target_field] = translated.strip()
+    doc.save(ignore_permissions=True)
+    frappe.db.commit()
+    return {"ok": True, "doctype": doctype, "name": name, "updated_fields": updates}
+
+
+def _generate_contract(payload: dict) -> dict:
+    data = _coerce_dict(payload)
+    title = data.get("title") or "Contratto"
+    counterparty = data.get("counterparty") or "Cliente"
+    body = data.get("body") or ""
+    sign_provider = data.get("sign_provider", "manual")
+    content = (
+        f"# {title}\n\n"
+        f"Parte contraente: {counterparty}\n\n"
+        f"{body}\n\n"
+        "## Firma\n"
+        f"- Provider: {sign_provider}\n"
+        "- Stato: Bozza\n"
+    )
+    file_name = f"contract-{frappe.utils.now_datetime().strftime('%Y%m%d-%H%M%S')}.md"
+    file_doc = frappe.get_doc(
+        {
+            "doctype": "File",
+            "file_name": file_name,
+            "is_private": 1,
+            "content": content,
+        }
+    )
+    file_doc.insert(ignore_permissions=True)
+    frappe.db.commit()
+    return {"ok": True, "file": file_doc.file_url, "sign_provider": sign_provider, "status": "draft"}
 
 
 @frappe.whitelist()
@@ -123,6 +276,21 @@ def execute_action(action_type: str, params: str = "{}"):
             cwd=str(_bench_root()),
         )
         return {"ok": result.returncode == 0, "stdout": result.stdout[:10000], "stderr": result.stderr[:3000]}
+
+    elif action_type == "create_customer":
+        return _create_customer(p.get("data", p))
+
+    elif action_type == "create_web_page":
+        return _create_web_page(p.get("data", p))
+
+    elif action_type == "create_webshop_item":
+        return _create_webshop_item(p.get("data", p))
+
+    elif action_type == "translate_doc_fields":
+        return _translate_doc_fields(p.get("data", p))
+
+    elif action_type == "generate_contract":
+        return _generate_contract(p.get("data", p))
 
     else:
         frappe.throw(_("Azione non supportata: {0}").format(action_type))
@@ -210,6 +378,11 @@ Azioni disponibili:
 - **run_python**: `{{"action":"run_python","code":"<codice python>"}}`
 - **run_shell**: `{{"action":"run_shell","cmd":"<comando>"}}` (solo comandi: bench, python, pip, ls, cat, grep, find, git, yarn, npm)
 - **bench_cmd**: `{{"action":"bench_cmd","site":"{site}","cmd":"<sottocomando bench>"}}`
+- **create_customer**: crea Customer + Contact + Address da JSON
+- **create_web_page**: crea/aggiorna pagina website (`title`, `route`, `html`)
+- **create_webshop_item**: crea/aggiorna articolo webshop (Item)
+- **translate_doc_fields**: traduce campi documento e scrive `<campo>_<lang>`
+- **generate_contract**: genera bozza contratto (File privato), pronto per firma
 
 Bench path: `{bench}`
 Sito corrente: `{site}`
