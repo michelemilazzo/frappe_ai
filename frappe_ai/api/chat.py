@@ -33,6 +33,8 @@ _CENTRAL_DEFAULTS = {
     "model": "qwen2.5:7b",
     "ollama_url": "http://10.10.0.4:11434",
     "system_prompt": "",
+    "github_owner": "michelemilazzo",
+    "github_token": None,
 }
 
 
@@ -61,6 +63,109 @@ def _coerce_dict(raw):
     if isinstance(raw, str):
         return json.loads(raw or "{}")
     return raw or {}
+
+
+def _github_headers(token: str | None):
+    if not token:
+        return {}
+    return {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def _discover_repo_for_app(app: str, owner: str, token: str | None) -> str | None:
+    direct = f"https://github.com/{owner}/{app}"
+    if subprocess.run(["git", "ls-remote", direct], capture_output=True, text=True).returncode == 0:
+        return direct
+
+    search_url = "https://api.github.com/search/repositories"
+    params = {"q": f"{app} in:name", "sort": "stars", "order": "desc", "per_page": 5}
+    resp = requests.get(search_url, params=params, headers=_github_headers(token), timeout=20)
+    if not resp.ok:
+        return None
+    for item in resp.json().get("items", []):
+        full_name = item.get("full_name", "")
+        if full_name:
+            return f"https://github.com/{full_name}"
+    return None
+
+
+def _fork_repo_if_needed(repo_url: str, owner: str, token: str | None) -> str:
+    if not repo_url.startswith("https://github.com/"):
+        return repo_url
+    path = repo_url.replace("https://github.com/", "").strip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    src_owner, src_repo = path.split("/", 1)
+    if src_owner.lower() == owner.lower():
+        return f"https://github.com/{owner}/{src_repo}"
+    if not token:
+        return repo_url
+
+    fork_api = f"https://api.github.com/repos/{src_owner}/{src_repo}/forks"
+    payload = {"name": src_repo, "default_branch_only": True}
+    requests.post(fork_api, json=payload, headers=_github_headers(token), timeout=30)
+
+    fork_repo = f"https://github.com/{owner}/{src_repo}"
+    for _ in range(15):
+        probe = requests.get(
+            f"https://api.github.com/repos/{owner}/{src_repo}",
+            headers=_github_headers(token),
+            timeout=15,
+        )
+        if probe.ok:
+            return fork_repo
+        frappe.utils.sleep(2)
+    return repo_url
+
+
+def _install_app_if_missing(payload: dict) -> dict:
+    data = _coerce_dict(payload)
+    app = (data.get("app") or "").strip()
+    if not app:
+        frappe.throw(_("app obbligatoria"))
+
+    settings = _get_settings()
+    owner = data.get("github_owner") or settings.get("github_owner") or "michelemilazzo"
+    token = data.get("github_token") or settings.get("github_token")
+    repo = (data.get("repo") or "").strip() or _discover_repo_for_app(app, owner, token)
+    if not repo:
+        frappe.throw(_("Repository non trovato per app: {0}").format(app))
+
+    repo_for_install = _fork_repo_if_needed(repo, owner, token)
+    branch = (data.get("branch") or "main").strip()
+    bench = _bench_root()
+
+    app_dir = bench / "apps" / app
+    installed_now = False
+    if not app_dir.exists():
+        cmd = ["bench", "get-app", "--branch", branch, app, repo_for_install]
+        res = subprocess.run(cmd, cwd=str(bench), capture_output=True, text=True, timeout=600)
+        if res.returncode != 0:
+            frappe.throw(_("get-app fallito: {0}").format((res.stderr or res.stdout)[-1500:]))
+        installed_now = True
+
+    site = data.get("site") or frappe.local.site
+    install_on_site = int(data.get("install_on_site", 1)) == 1
+    site_out = ""
+    if install_on_site and site:
+        cmd = ["bench", "--site", site, "install-app", app]
+        res = subprocess.run(cmd, cwd=str(bench), capture_output=True, text=True, timeout=600)
+        site_out = (res.stdout or "")[-1500:]
+        if res.returncode != 0 and "already installed" not in (res.stderr or "").lower():
+            frappe.throw(_("install-app fallito: {0}").format((res.stderr or res.stdout)[-1500:]))
+
+    return {
+        "ok": True,
+        "app": app,
+        "repo_source": repo,
+        "repo_used": repo_for_install,
+        "cloned_now": installed_now,
+        "site": site,
+        "site_output": site_out,
+    }
 
 
 def _create_customer(payload: dict) -> dict:
@@ -292,6 +397,9 @@ def execute_action(action_type: str, params: str = "{}"):
     elif action_type == "generate_contract":
         return _generate_contract(p.get("data", p))
 
+    elif action_type == "install_app_if_missing":
+        return _install_app_if_missing(p.get("data", p))
+
     else:
         frappe.throw(_("Azione non supportata: {0}").format(action_type))
 
@@ -383,6 +491,7 @@ Azioni disponibili:
 - **create_webshop_item**: crea/aggiorna articolo webshop (Item)
 - **translate_doc_fields**: traduce campi documento e scrive `<campo>_<lang>`
 - **generate_contract**: genera bozza contratto (File privato), pronto per firma
+- **install_app_if_missing**: cerca app (repo tuo o internet), fa fork su GitHub owner configurato, `bench get-app` e `install-app`
 
 Bench path: `{bench}`
 Sito corrente: `{site}`
