@@ -168,6 +168,65 @@ def _install_app_if_missing(payload: dict) -> dict:
     }
 
 
+def _publish_to_press_marketplace(payload: dict) -> dict:
+    data = _coerce_dict(payload)
+    app = (data.get("app") or "").strip()
+    title = (data.get("title") or app.replace("_", " ").title()).strip()
+    team = (data.get("team") or "").strip()
+    if not app:
+        frappe.throw(_("app obbligatoria"))
+    if not team:
+        frappe.throw(_("team obbligatorio"))
+
+    source_name = data.get("source_name") or f"SRC-{app}-001"
+    repository = (data.get("repository") or app).strip()
+    repo_url = (data.get("repo_url") or f"https://github.com/michelemilazzo/{repository}").strip()
+    branch = (data.get("branch") or "main").strip()
+
+    if frappe.db.exists("App Source", source_name):
+        src = frappe.get_doc("App Source", source_name)
+    else:
+        src = frappe.new_doc("App Source")
+        src.name = source_name
+    src.app = app
+    src.app_title = title
+    src.repository = repository
+    src.repository_owner = "michelemilazzo"
+    src.repository_url = repo_url
+    src.branch = branch
+    src.team = team
+    src.enabled = 1
+    src.public = 1
+    src.insert(ignore_permissions=True) if src.is_new() else src.save(ignore_permissions=True)
+
+    if frappe.db.exists("Marketplace App", {"app": app}):
+        mp_name = frappe.db.get_value("Marketplace App", {"app": app}, "name")
+        mp = frappe.get_doc("Marketplace App", mp_name)
+    else:
+        mp = frappe.new_doc("Marketplace App")
+    mp.app = app
+    mp.title = title
+    mp.team = team
+    mp.route = f"marketplace/apps/{app}"
+    mp.published = 1
+    mp.status = "Published"
+    if not mp.published_on:
+        mp.published_on = frappe.utils.nowdate()
+    if data.get("description"):
+        mp.description = data.get("description")
+    mp.insert(ignore_permissions=True) if mp.is_new() else mp.save(ignore_permissions=True)
+    frappe.db.commit()
+
+    return {
+        "ok": True,
+        "app": app,
+        "source": src.name,
+        "marketplace_app": mp.name,
+        "route": mp.route,
+        "published": int(mp.published or 0),
+    }
+
+
 def _create_customer(payload: dict) -> dict:
     data = _coerce_dict(payload)
     customer_name = data.get("customer_name") or data.get("name")
@@ -400,6 +459,9 @@ def execute_action(action_type: str, params: str = "{}"):
     elif action_type == "install_app_if_missing":
         return _install_app_if_missing(p.get("data", p))
 
+    elif action_type == "publish_to_press_marketplace":
+        return _publish_to_press_marketplace(p.get("data", p))
+
     else:
         frappe.throw(_("Azione non supportata: {0}").format(action_type))
 
@@ -492,6 +554,7 @@ Azioni disponibili:
 - **translate_doc_fields**: traduce campi documento e scrive `<campo>_<lang>`
 - **generate_contract**: genera bozza contratto (File privato), pronto per firma
 - **install_app_if_missing**: cerca app (repo tuo o internet), fa fork su GitHub owner configurato, `bench get-app` e `install-app`
+- **publish_to_press_marketplace**: crea/aggiorna `App Source` e `Marketplace App` in Press e pubblica su `marketplace/apps/<app>`
 
 Bench path: `{bench}`
 Sito corrente: `{site}`
