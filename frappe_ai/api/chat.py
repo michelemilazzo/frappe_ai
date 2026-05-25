@@ -227,6 +227,21 @@ def _publish_to_press_marketplace(payload: dict) -> dict:
     }
 
 
+def _ensure_app_available_everywhere(payload: dict) -> dict:
+    data = _coerce_dict(payload)
+    install_res = _install_app_if_missing(data)
+    publish_data = dict(data)
+    publish_data.setdefault("app", install_res.get("app"))
+    publish_data.setdefault("repo_url", install_res.get("repo_used"))
+    publish_data.setdefault("repository", (install_res.get("repo_used") or "").rstrip("/").split("/")[-1])
+    publish_res = _publish_to_press_marketplace(publish_data)
+    return {
+        "ok": True,
+        "install": install_res,
+        "publish": publish_res,
+    }
+
+
 def _create_customer(payload: dict) -> dict:
     data = _coerce_dict(payload)
     customer_name = data.get("customer_name") or data.get("name")
@@ -462,6 +477,9 @@ def execute_action(action_type: str, params: str = "{}"):
     elif action_type == "publish_to_press_marketplace":
         return _publish_to_press_marketplace(p.get("data", p))
 
+    elif action_type == "ensure_app_available_everywhere":
+        return _ensure_app_available_everywhere(p.get("data", p))
+
     else:
         frappe.throw(_("Azione non supportata: {0}").format(action_type))
 
@@ -555,6 +573,7 @@ Azioni disponibili:
 - **generate_contract**: genera bozza contratto (File privato), pronto per firma
 - **install_app_if_missing**: cerca app (repo tuo o internet), fa fork su GitHub owner configurato, `bench get-app` e `install-app`
 - **publish_to_press_marketplace**: crea/aggiorna `App Source` e `Marketplace App` in Press e pubblica su `marketplace/apps/<app>`
+- **ensure_app_available_everywhere**: esegue install/fork + publish marketplace in un unico step
 
 Bench path: `{bench}`
 Sito corrente: `{site}`
