@@ -53,6 +53,16 @@ Optional site/bench keys in `site_config.json` or `common_site_config.json`:
 - `frappe_ai_fallback_provider`
 - `frappe_ai_fallback_model`
 
+## Website Guest Access
+
+Public website chat calls are whitelisted for guests:
+
+- `frappe_ai.api.chat.send_message`
+- `frappe_ai.api.chat.get_memory`
+- `frappe_ai.api.chat.save_memory`
+
+Guest memory is isolated by session id (not shared globally across visitors).
+
 ## API Usage
 
 ```python

@@ -47,10 +47,13 @@ _MEMORY_LIMIT = 40
 def _memory_cache_key() -> str:
     user = frappe.session.user or "Guest"
     site = frappe.local.site or "default"
+    if user == "Guest":
+        sid = getattr(frappe.session, "sid", None) or "anon"
+        return f"frappe_ai:memory:{site}:{user}:{sid}"
     return f"frappe_ai:memory:{site}:{user}"
 
 
-@frappe.whitelist()
+@frappe.whitelist(allow_guest=True)
 def get_memory():
     """Return persisted chat memory for current user/site."""
     raw = frappe.cache().get_value(_memory_cache_key())
@@ -66,7 +69,7 @@ def get_memory():
     return {"history": history[-_MEMORY_LIMIT:], "agent_mode": int(bool((data or {}).get("agent_mode")))}
 
 
-@frappe.whitelist()
+@frappe.whitelist(allow_guest=True)
 def save_memory(history=None, agent_mode: int = 0):
     """Persist chat memory for current user/site."""
     if isinstance(history, str):
@@ -575,7 +578,7 @@ def _auto_execute_actions(reply: str) -> tuple[str, list[dict]]:
     return cleaned, results
 
 
-@frappe.whitelist()
+@frappe.whitelist(allow_guest=True)
 def send_message(message: str, history=None, agent_mode: int = 0):
     """Send a message to the configured AI provider and return the response."""
     if isinstance(history, str):
