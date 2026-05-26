@@ -41,6 +41,52 @@ _CENTRAL_DEFAULTS = {
     "fallback_model": "qwen2.5:7b",
 }
 
+_MEMORY_LIMIT = 40
+
+
+def _memory_cache_key() -> str:
+    user = frappe.session.user or "Guest"
+    site = frappe.local.site or "default"
+    return f"frappe_ai:memory:{site}:{user}"
+
+
+@frappe.whitelist()
+def get_memory():
+    """Return persisted chat memory for current user/site."""
+    raw = frappe.cache().get_value(_memory_cache_key())
+    if not raw:
+        return {"history": [], "agent_mode": 0}
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        data = {}
+    history = data.get("history") if isinstance(data, dict) else []
+    if not isinstance(history, list):
+        history = []
+    return {"history": history[-_MEMORY_LIMIT:], "agent_mode": int(bool((data or {}).get("agent_mode")))}
+
+
+@frappe.whitelist()
+def save_memory(history=None, agent_mode: int = 0):
+    """Persist chat memory for current user/site."""
+    if isinstance(history, str):
+        try:
+            history = json.loads(history)
+        except Exception:
+            history = []
+    history = history if isinstance(history, list) else []
+    cleaned = []
+    for entry in history[-_MEMORY_LIMIT:]:
+        if not isinstance(entry, dict):
+            continue
+        role = entry.get("role")
+        content = entry.get("content")
+        if role in ("user", "assistant", "system") and isinstance(content, str):
+            cleaned.append({"role": role, "content": content[:10000]})
+    payload = {"history": cleaned, "agent_mode": int(bool(agent_mode))}
+    frappe.cache().set_value(_memory_cache_key(), json.dumps(payload))
+    return {"ok": True, "count": len(cleaned)}
+
 
 def _check_action_permission():
     if frappe.session.user not in _ACTION_ALLOWED_USERS:

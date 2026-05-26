@@ -22,6 +22,41 @@
     let isOpen = false;
     let attachedFiles = [];
     let agentMode = false;
+    const MEMORY_KEY = "frappe_ai_memory_v1";
+
+    function saveLocalMemory() {
+        try {
+            localStorage.setItem(MEMORY_KEY, JSON.stringify({
+                history: history.slice(-20),
+                agent_mode: agentMode ? 1 : 0
+            }));
+        } catch (e) {}
+    }
+
+    function loadLocalMemory() {
+        try {
+            const raw = localStorage.getItem(MEMORY_KEY);
+            if (!raw) return;
+            const data = JSON.parse(raw);
+            history = Array.isArray(data.history) ? data.history.slice(-20) : [];
+            agentMode = !!data.agent_mode;
+        } catch (e) {}
+    }
+
+    function saveServerMemory() {
+        aiCall("frappe_ai.api.chat.save_memory", { history: history.slice(-20), agent_mode: agentMode ? 1 : 0 }, function(){}, function(){});
+    }
+
+    function loadServerMemory(done) {
+        aiCall("frappe_ai.api.chat.get_memory", {}, function (r) {
+            const mem = (r && r.message) || {};
+            history = Array.isArray(mem.history) ? mem.history.slice(-20) : history;
+            agentMode = !!mem.agent_mode;
+            done && done();
+        }, function () {
+            done && done();
+        });
+    }
 
     const ICON_AGENT = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>`;
 
@@ -91,6 +126,7 @@
     // ── Init ─────────────────────────────────────────────────────────────────
     function init() {
         if (document.getElementById("frappe-ai-btn")) return;
+        loadLocalMemory();
 
         const btn = document.createElement("button");
         btn.id = "frappe-ai-btn";
@@ -139,12 +175,25 @@
             agentMode = e.target.checked;
             const label = document.getElementById("frappe-ai-agent-label");
             label.style.color = agentMode ? "#f97316" : "";
+            saveLocalMemory();
+            saveServerMemory();
             if (agentMode) {
                 appendMessage("assistant", "⚡ **Agent Mode attivo.** Posso scrivere file e eseguire comandi sul server. Dimmi cosa fare.");
             }
         });
+        document.getElementById("frappe-ai-agent-toggle").checked = agentMode;
+        document.getElementById("frappe-ai-agent-label").style.color = agentMode ? "#f97316" : "";
 
-        appendMessage("assistant", "Ciao! Sono l'assistente AI. Come posso aiutarti con Frappe/ERPNext?");
+        loadServerMemory(function () {
+            const msgs = document.getElementById("frappe-ai-messages");
+            msgs.innerHTML = "";
+            if (history.length) {
+                history.forEach(function (h) { appendMessage(h.role || "assistant", h.content || ""); });
+            } else {
+                appendMessage("assistant", "Ciao! Sono l'assistente AI. Come posso aiutarti con Frappe/ERPNext?");
+            }
+            saveLocalMemory();
+        });
     }
 
     async function handleFileSelect(e) {
@@ -305,6 +354,8 @@
         appendMessage("user", displayText);
 
         history.push({ role: "user", content: fullMessage });
+        saveLocalMemory();
+        saveServerMemory();
         attachedFiles = [];
         renderAttachments();
 
@@ -324,6 +375,8 @@
                     appendMessage("assistant", reply);
                     history.push({ role: "assistant", content: reply });
                     if (history.length > 20) history = history.slice(-20);
+                    saveLocalMemory();
+                    saveServerMemory();
                     // Show action results summary
                     const actions = r.message.actions || [];
                     if (actions.length > 0) {
