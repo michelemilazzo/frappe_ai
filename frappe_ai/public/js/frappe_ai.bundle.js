@@ -190,7 +190,7 @@
             if (history.length) {
                 history.forEach(function (h) { appendMessage(h.role || "assistant", h.content || ""); });
             } else {
-                appendMessage("assistant", "Ciao! Sono l'assistente AI. Come posso aiutarti con Frappe/ERPNext?");
+                appendMessage("assistant", `Ciao! Sono l'assistente AI. Come posso aiutarti con ${getSiteName()}?`);
             }
             saveLocalMemory();
         });
@@ -276,6 +276,17 @@
             .replace(/\n/g, "<br>");
     }
 
+    function getSiteName() {
+        try {
+            const host = (window.location.hostname || "").toLowerCase().replace(/^www\./, "");
+            const base = host.split(".")[0] || "";
+            const clean = base.replace(/[-_]+/g, " ").trim();
+            return clean || "sito";
+        } catch (e) {
+            return "sito";
+        }
+    }
+
     // ── API helper (works on desk AND Press Vue SPA) ─────────────────────────
     function aiCall(method, args, onSuccess, onError) {
         var body = {};
@@ -293,7 +304,14 @@
             body: new URLSearchParams(body).toString(),
             credentials: 'same-origin',
         }).then(function (res) {
-            return res.json().then(function (data) {
+            return res.text().then(function (raw) {
+                var data = {};
+                try {
+                    data = raw ? JSON.parse(raw) : {};
+                } catch (e) {
+                    onError && onError('Risposta non valida dal server (HTML/errore proxy).');
+                    return;
+                }
                 if (!res.ok || data.exc) {
                     var msg = '';
                     try {
