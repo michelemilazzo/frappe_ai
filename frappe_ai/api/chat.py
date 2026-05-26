@@ -14,8 +14,29 @@ _URL_RE = re.compile(r'https?://[^\s\)\]>"\',]+', re.IGNORECASE)
 # Action block regex: ```action\n{...}\n```
 _ACTION_RE = re.compile(r'```action\s*\n(\{[\s\S]*?\})\s*\n```', re.IGNORECASE)
 
-# Users allowed to execute server actions
+# Users allowed to execute invasive server actions
 _ACTION_ALLOWED_USERS = {"Administrator", "admin@onekeyco.com"}
+
+# Non-invasive actions allowed to authenticated users
+_NON_INVASIVE_ACTIONS = {
+    "create_customer",
+    "create_web_page",
+    "create_webshop_item",
+    "translate_doc_fields",
+    "generate_contract",
+    "publish_to_press_marketplace",
+}
+
+_INVASIVE_ACTIONS = {
+    "write_file",
+    "read_file",
+    "list_files",
+    "run_python",
+    "run_shell",
+    "bench_cmd",
+    "install_app_if_missing",
+    "ensure_app_available_everywhere",
+}
 
 # Safe shell commands prefix whitelist
 _SAFE_SHELL_PREFIXES = (
@@ -91,9 +112,19 @@ def save_memory(history=None, agent_mode: int = 0):
     return {"ok": True, "count": len(cleaned)}
 
 
-def _check_action_permission():
-    if frappe.session.user not in _ACTION_ALLOWED_USERS:
-        frappe.throw(_("Azione non consentita. Riservata ad Administrator e admin@onekeyco.com."))
+def _check_action_permission(action_type: str):
+    user = frappe.session.user or "Guest"
+    if action_type in _INVASIVE_ACTIONS:
+        if user not in _ACTION_ALLOWED_USERS:
+            frappe.throw(_("Azione invasiva non consentita. Riservata ad Administrator e admin@onekeyco.com."))
+        return
+    if action_type in _NON_INVASIVE_ACTIONS:
+        if user == "Guest":
+            frappe.throw(_("Login richiesto per questa azione."))
+        return
+    # Unknown action: keep strict.
+    if user not in _ACTION_ALLOWED_USERS:
+        frappe.throw(_("Azione non consentita."))
 
 
 def _bench_root() -> Path:
@@ -459,7 +490,7 @@ def _generate_contract(payload: dict) -> dict:
 @frappe.whitelist()
 def execute_action(action_type: str, params: str = "{}"):
     """Execute a real server action. Reserved for Administrator and admin@onekeyco.com."""
-    _check_action_permission()
+    _check_action_permission(action_type)
     p = json.loads(params) if isinstance(params, str) else (params or {})
 
     if action_type == "write_file":
@@ -553,9 +584,6 @@ def execute_action(action_type: str, params: str = "{}"):
 
 def _auto_execute_actions(reply: str) -> tuple[str, list[dict]]:
     """Parse and execute ```action {...}``` blocks from AI reply. Returns (cleaned_reply, results)."""
-    if frappe.session.user not in _ACTION_ALLOWED_USERS:
-        return reply, []
-
     results = []
     def _run_block(m):
         try:
@@ -594,7 +622,7 @@ def send_message(message: str, history=None, agent_mode: int = 0):
 
     # Build system prompt — extend with agent instructions when enabled
     base_prompt = settings.get("system_prompt", "") + "\n\n" + _frappe_context()
-    is_agent = int(agent_mode) == 1 and frappe.session.user in _ACTION_ALLOWED_USERS
+    is_agent = int(agent_mode) == 1 and (frappe.session.user or "Guest") != "Guest"
     if is_agent:
         base_prompt += "\n\n" + _agent_instructions()
 
@@ -680,6 +708,7 @@ Regole:
 - Usa path relativi rispetto al bench quando possibile
 - Prima di scrivere un file mostra cosa farai
 - Puoi includere più blocchi ```action``` in una risposta
+- Azioni invasive (file/shell/python/bench/install) sono consentite solo ad Administrator
 - I risultati vengono mostrati all'utente automaticamente"""
 
 
