@@ -36,6 +36,23 @@ Agent mode can execute real actions from the chat UI for allowed users:
 - Runtime actions: `run_python`, `run_shell`, `bench_cmd`
 - Business actions: `create_customer`, `create_web_page`, `create_webshop_item`, `translate_doc_fields`, `generate_contract`
 
+## Global Routing And Fallback
+
+Default behavior is global and works across installations:
+
+- Primary provider: `Claude Code (local)` (no external API key)
+- Simple tasks: route to free model provider (`OpenRouter` free model)
+- Fallback: local `Ollama` model (`qwen2.5:7b`) if primary/free route fails
+
+Optional site/bench keys in `site_config.json` or `common_site_config.json`:
+
+- `frappe_ai_provider`
+- `frappe_ai_model`
+- `frappe_ai_simple_task_provider`
+- `frappe_ai_simple_task_model`
+- `frappe_ai_fallback_provider`
+- `frappe_ai_fallback_model`
+
 ## API Usage
 
 ```python

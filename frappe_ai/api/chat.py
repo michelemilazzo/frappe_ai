@@ -28,13 +28,17 @@ _SAFE_SHELL_PREFIXES = (
 # Central defaults — read from common_site_config or hardcoded fallback.
 # All sites share this unless overridden via AI Settings doctype.
 _CENTRAL_DEFAULTS = {
-    "provider": "Ollama",
+    "provider": "Claude Code (local)",
     "api_key": None,
     "model": "qwen2.5:7b",
     "ollama_url": "http://10.10.0.4:11434",
     "system_prompt": "",
     "github_owner": "michelemilazzo",
     "github_token": None,
+    "simple_task_provider": "OpenRouter",
+    "simple_task_model": "meta-llama/llama-3.2-3b-instruct:free",
+    "fallback_provider": "Ollama",
+    "fallback_model": "qwen2.5:7b",
 }
 
 
@@ -63,6 +67,20 @@ def _coerce_dict(raw):
     if isinstance(raw, str):
         return json.loads(raw or "{}")
     return raw or {}
+
+
+def _is_simple_task(message: str) -> bool:
+    msg = (message or "").strip().lower()
+    if not msg:
+        return True
+    if len(msg) > 350:
+        return False
+    complex_markers = (
+        "codice", "code", "script", "python", "sql", "api", "deploy", "install",
+        "migra", "migrate", "server", "bench", "errore", "error", "debug",
+        "contratto", "firma", "webshop", "customer", "doctype",
+    )
+    return not any(k in msg for k in complex_markers)
 
 
 def _github_headers(token: str | None):
@@ -533,13 +551,44 @@ def send_message(message: str, history=None, agent_mode: int = 0):
 
     messages = _build_messages(base_prompt, history or [], message)
 
-    reply = _call_provider(
-        provider=provider,
-        api_key=settings.get("api_key"),
-        model=settings.get("model"),
-        messages=messages,
-        ollama_url=settings.get("ollama_url"),
-    )
+    # Auto-routing:
+    # 1) For simple tasks prefer free model provider (if configured).
+    # 2) Fall back to primary provider.
+    # 3) Final fallback to local Ollama.
+    is_simple = _is_simple_task(message)
+    primary = (provider, settings.get("model"))
+    simple_route = (settings.get("simple_task_provider"), settings.get("simple_task_model"))
+    final_fallback = (settings.get("fallback_provider") or "Ollama", settings.get("fallback_model") or _CENTRAL_DEFAULTS["model"])
+
+    attempts = []
+    if is_simple and simple_route[0]:
+        attempts.append(simple_route)
+    attempts.append(primary)
+    attempts.append(final_fallback)
+
+    seen = set()
+    last_error = None
+    reply = ""
+    for pvd, mdl in attempts:
+        key = (pvd or "", mdl or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            reply = _call_provider(
+                provider=pvd,
+                api_key=settings.get("api_key"),
+                model=mdl,
+                messages=messages,
+                ollama_url=settings.get("ollama_url"),
+            )
+            break
+        except Exception as e:
+            last_error = str(e)
+            continue
+
+    if not reply:
+        frappe.throw(_("Nessun provider AI disponibile. Ultimo errore: {0}").format(last_error or "sconosciuto"))
 
     actions_executed = []
     if is_agent:
@@ -604,6 +653,14 @@ def _get_settings():
         result["ollama_url"] = conf.frappe_ai_ollama_url
     if conf.get("frappe_ai_system_prompt"):
         result["system_prompt"] = conf.frappe_ai_system_prompt
+    if conf.get("frappe_ai_simple_task_provider"):
+        result["simple_task_provider"] = conf.frappe_ai_simple_task_provider
+    if conf.get("frappe_ai_simple_task_model"):
+        result["simple_task_model"] = conf.frappe_ai_simple_task_model
+    if conf.get("frappe_ai_fallback_provider"):
+        result["fallback_provider"] = conf.frappe_ai_fallback_provider
+    if conf.get("frappe_ai_fallback_model"):
+        result["fallback_model"] = conf.frappe_ai_fallback_model
 
     # Optional per-site override via AI Settings doctype — silently ignored if missing/empty.
     # If explicit site config keys are set, keep them as source of truth.
