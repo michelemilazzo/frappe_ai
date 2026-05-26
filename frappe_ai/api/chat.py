@@ -605,17 +605,22 @@ def _get_settings():
     if conf.get("frappe_ai_system_prompt"):
         result["system_prompt"] = conf.frappe_ai_system_prompt
 
-    # Optional per-site override via AI Settings doctype — silently ignored if missing/empty
+    # Optional per-site override via AI Settings doctype — silently ignored if missing/empty.
+    # If explicit site config keys are set, keep them as source of truth.
     try:
+        provider_locked = bool(conf.get("frappe_ai_provider"))
+        model_locked = bool(conf.get("frappe_ai_model"))
+        ollama_locked = bool(conf.get("frappe_ai_ollama_url"))
+        prompt_locked = bool(conf.get("frappe_ai_system_prompt"))
         if frappe.db.exists("DocType", "AI Settings"):
             doc = frappe.get_single("AI Settings")
-            if doc.provider:
+            if doc.provider and not provider_locked:
                 result["provider"] = doc.provider
-            if doc.model:
+            if doc.model and not model_locked:
                 result["model"] = doc.model
-            if doc.system_prompt:
+            if doc.system_prompt and not prompt_locked:
                 result["system_prompt"] = doc.system_prompt
-            if getattr(doc, "ollama_url", None):
+            if getattr(doc, "ollama_url", None) and not ollama_locked:
                 result["ollama_url"] = doc.ollama_url
             # api_key only if explicitly saved — never raise on missing password
             try:
