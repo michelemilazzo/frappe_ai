@@ -49,10 +49,11 @@ _SAFE_SHELL_PREFIXES = (
 # Central defaults — read from common_site_config or hardcoded fallback.
 # All sites share this unless overridden via AI Settings doctype.
 _CENTRAL_DEFAULTS = {
-    "provider": "Claude Code (local)",
+    "provider": "AI-MMOS-Core",
     "api_key": None,
     "model": "qwen2.5:7b",
     "ollama_url": "http://10.10.0.4:11434",
+    "core_chat_path": "/v1/chat/completions",
     "system_prompt": "",
     "github_owner": "michelemilazzo",
     "github_token": None,
@@ -115,9 +116,7 @@ def save_memory(history=None, agent_mode: int = 0):
 def _check_action_permission(action_type: str):
     user = frappe.session.user or "Guest"
     if action_type in _INVASIVE_ACTIONS:
-        if user not in _ACTION_ALLOWED_USERS:
-            frappe.throw(_("Azione invasiva non consentita. Riservata ad Administrator e admin@onekeyco.com."))
-        return
+        frappe.throw(_("Azioni invasive disabilitate su Press. Usa AI-MMOS-Core per operazioni infrastrutturali."))
     if action_type in _NON_INVASIVE_ACTIONS:
         if user == "Guest":
             frappe.throw(_("Login richiesto per questa azione."))
@@ -729,6 +728,8 @@ def _get_settings():
         result["api_key"] = conf.frappe_ai_api_key
     if conf.get("frappe_ai_ollama_url"):
         result["ollama_url"] = conf.frappe_ai_ollama_url
+    if conf.get("frappe_ai_core_chat_path"):
+        result["core_chat_path"] = conf.frappe_ai_core_chat_path
     if conf.get("frappe_ai_system_prompt"):
         result["system_prompt"] = conf.frappe_ai_system_prompt
     if conf.get("frappe_ai_simple_task_provider"):
@@ -868,18 +869,53 @@ def _build_messages(system_prompt, history, user_message):
 
 
 def _call_provider(provider, api_key, model, messages, ollama_url=None):
-    if provider in ("Claude Code (locale)", "Claude Code (local)"):
-        return _call_claude_code(messages)
-    elif provider == "Ollama":
-        base = (ollama_url or _CENTRAL_DEFAULTS["ollama_url"]).rstrip("/")
-        return _call_ollama(base, model or _CENTRAL_DEFAULTS["model"], messages)
-    elif provider == "Claude (Anthropic)":
-        return _call_anthropic(api_key, model, messages)
-    elif provider == "OpenAI":
-        return _call_openai_compatible("https://api.openai.com/v1/chat/completions", api_key, model, messages)
-    else:
-        # OpenRouter (default)
-        return _call_openai_compatible("https://openrouter.ai/api/v1/chat/completions", api_key, model, messages)
+    # Press is orchestrator-only: always route to AI-MMOS-Core.
+    base = (ollama_url or _CENTRAL_DEFAULTS["ollama_url"]).rstrip("/")
+    return _call_ai_core(
+        base_url=base,
+        chat_path=_CENTRAL_DEFAULTS.get("core_chat_path") or "/v1/chat/completions",
+        model=(model or _CENTRAL_DEFAULTS["model"]),
+        messages=messages,
+    )
+
+
+def _call_ai_core(base_url, chat_path, model, messages):
+    path = chat_path or "/v1/chat/completions"
+    if not path.startswith("/"):
+        path = "/" + path
+    url = f"{base_url.rstrip('/')}{path}"
+
+    candidates = [model, "qwen2.5:7b", "llama3.1:8b", "mistral:7b"]
+    seen = set()
+    last_error = None
+
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            resp = requests.post(
+                url,
+                json={"model": candidate, "messages": messages, "stream": False},
+                headers={"Content-Type": "application/json"},
+                timeout=180,
+            )
+        except requests.exceptions.ConnectionError:
+            frappe.throw(_("AI-MMOS-Core non raggiungibile su {0}.").format(base_url))
+
+        if not resp.ok:
+            if resp.status_code in (400, 404, 429):
+                last_error = f"{resp.status_code} ({candidate})"
+                continue
+            frappe.throw(_("AI-MMOS-Core error {0}: {1}").format(resp.status_code, resp.text[:300]))
+
+        try:
+            data = resp.json()
+            return data["choices"][0]["message"]["content"]
+        except Exception:
+            frappe.throw(_("AI-MMOS-Core risposta non valida (status {0}): {1}").format(resp.status_code, resp.text[:300]))
+
+    frappe.throw(_("Nessun modello disponibile su AI-MMOS-Core. Ultimo errore: {0}").format(last_error or "unknown"))
 
 
 def _call_ollama(base_url, model, messages):

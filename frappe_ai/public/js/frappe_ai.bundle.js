@@ -142,7 +142,7 @@
             <div id="frappe-ai-header">
                 <span>${ICON_CHAT} AI Assistant</span>
                 <div style="display:flex;align-items:center;gap:6px">
-                    <label id="frappe-ai-agent-label" title="Agent Mode: l'AI può scrivere file e eseguire comandi sul server (solo Administrator)" style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;user-select:none">
+                    <label id="frappe-ai-agent-label" title="Agent Mode: orchestrazione avanzata via AI-MMOS-Core (solo Administrator)" style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;user-select:none">
                         ${ICON_AGENT}
                         <span>Agent</span>
                         <input type="checkbox" id="frappe-ai-agent-toggle" style="margin:0;cursor:pointer">
@@ -178,7 +178,7 @@
             saveLocalMemory();
             saveServerMemory();
             if (agentMode) {
-                appendMessage("assistant", "⚡ **Agent Mode attivo.** Posso scrivere file e eseguire comandi sul server. Dimmi cosa fare.");
+                appendMessage("assistant", "⚡ **Agent Mode orchestratore attivo.** Inoltro le richieste avanzate ad AI-MMOS-Core.");
             }
         });
         document.getElementById("frappe-ai-agent-toggle").checked = agentMode;
@@ -401,8 +401,8 @@
                         const ok = actions.filter(a => a.ok !== false).length;
                         const fail = actions.length - ok;
                         const summary = fail > 0
-                            ? `⚠️ ${ok} azioni completate, ${fail} errori`
-                            : `✅ ${ok} azione/i eseguita/e sul server`;
+                            ? `⚠️ ${ok} azioni orchestrate, ${fail} errori`
+                            : `✅ ${ok} azione/i orchestrata/e via AI-MMOS-Core`;
                         appendMessage("system", summary);
                     }
                 } else {
