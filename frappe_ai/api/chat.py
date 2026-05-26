@@ -116,7 +116,9 @@ def save_memory(history=None, agent_mode: int = 0):
 def _check_action_permission(action_type: str):
     user = frappe.session.user or "Guest"
     if action_type in _INVASIVE_ACTIONS:
-        frappe.throw(_("Azioni invasive disabilitate su Press. Usa AI-MMOS-Core per operazioni infrastrutturali."))
+        if user not in _ACTION_ALLOWED_USERS:
+            frappe.throw(_("Azione invasiva non consentita. Riservata ad Administrator e admin@onekeyco.com."))
+        return
     if action_type in _NON_INVASIVE_ACTIONS:
         if user == "Guest":
             frappe.throw(_("Login richiesto per questa azione."))
