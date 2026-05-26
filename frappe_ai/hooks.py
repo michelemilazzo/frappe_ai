@@ -11,5 +11,7 @@ required_apps = []
 
 app_include_js = ["frappe_ai.bundle.js"]
 app_include_css = ["/assets/frappe_ai/css/frappe_ai.css"]
+web_include_js = ["/assets/frappe_ai/js/frappe_ai.bundle.js"]
+web_include_css = ["/assets/frappe_ai/css/frappe_ai.css"]
 
 after_install = "frappe_ai.install.after_install"
