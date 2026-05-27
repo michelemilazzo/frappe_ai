@@ -49,16 +49,18 @@ _SAFE_SHELL_PREFIXES = (
 # Central defaults — read from common_site_config or hardcoded fallback.
 # All sites share this unless overridden via AI Settings doctype.
 _CENTRAL_DEFAULTS = {
-    "provider": "AI-MMOS-Core",
+    "provider": "Claude Code",
     "api_key": None,
-    "model": "qwen2.5:7b",
+    "model": "claude-sonnet-4-6",
     "ollama_url": "http://10.10.0.4:11434",
     "core_chat_path": "/v1/chat/completions",
+    # HTTP bridge that wraps the local `claude --print` CLI on mmos-press
+    "claude_code_bridge_url": "http://10.10.0.10:19999/",
     "system_prompt": "",
     "github_owner": "michelemilazzo",
     "github_token": None,
-    "simple_task_provider": "OpenRouter",
-    "simple_task_model": "meta-llama/llama-3.2-3b-instruct:free",
+    "simple_task_provider": "Claude Code",
+    "simple_task_model": "claude-haiku-4-5-20251001",
     "fallback_provider": "Ollama",
     "fallback_model": "qwen2.5:7b",
 }
@@ -871,7 +873,29 @@ def _build_messages(system_prompt, history, user_message):
 
 
 def _call_provider(provider, api_key, model, messages, ollama_url=None):
-    # Press is orchestrator-only: always route to AI-MMOS-Core.
+    """Route the request to the appropriate AI backend."""
+    pvd = (provider or _CENTRAL_DEFAULTS["provider"]).strip()
+
+    # ── Claude Code bridge (default) ────────────────────────────────────
+    if pvd == "Claude Code":
+        bridge_url = _CENTRAL_DEFAULTS.get("claude_code_bridge_url", "http://10.10.0.10:19999/")
+        mdl = model or _CENTRAL_DEFAULTS["model"]
+        try:
+            resp = requests.post(
+                bridge_url,
+                json={"messages": messages, "model": mdl, "stream": False},
+                headers={"Content-Type": "application/json"},
+                timeout=120,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if "error" in data:
+                frappe.throw(_("Claude Code bridge error: {0}").format(data["error"]))
+            return data.get("content", "")
+        except requests.exceptions.ConnectionError:
+            frappe.throw(_("Frappe AI Bridge non raggiungibile su {0}. Verificare che il servizio sia attivo.").format(bridge_url))
+
+    # ── Ollama / AI-MMOS-Core ────────────────────────────────────────────
     base = (ollama_url or _CENTRAL_DEFAULTS["ollama_url"]).rstrip("/")
     return _call_ai_core(
         base_url=base,
